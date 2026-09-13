@@ -1,0 +1,37 @@
+# Runtime output and local diagnostics
+/logs/
+/test_logs/
+/sim_results/
+**/__pycache__/
+*.py[cod]
+/.pytest_cache/
+
+# Local backups and editor artifacts
+/.codex_backup*/
+*.bak
+*.tmp
+*.swp
+*~
+.DS_Store
+Thumbs.db
+
+# Local environment and credentials
+.env
+.env.*
+*.pem
+*.key
+
+# Large model artifacts are deployed separately from source control
+/*.onnx
+/distance model/*.onnx
+/distance model/*.rknn
+/distance model/*.pt
+
+# Hardware/reference documents are archived outside the runtime repository
+/*.pdf
+/*.xlsx
+/instruct/
+/summary.md
+
+# Unused maintenance GUI contains a legacy hard-coded login
+/tools_py/system_update.py

@@ -1,0 +1,5 @@
+# Recommended runtime: Python 3.10.x
+numpy==1.26.4
+scipy==1.11.4
+pyserial==3.5
+pynmea2==1.19.0

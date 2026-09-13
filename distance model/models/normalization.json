@@ -1,0 +1,38 @@
+{
+  "mean": {
+    "bbox_width_px": 23.363270474130267,
+    "bbox_height_px": 11.635001963109929,
+    "bbox_area_px": 611.3737316308213,
+    "bbox_aspect_ratio": 2.0080160319078173,
+    "bbox_center_u_norm": 0.5002733943422635,
+    "bbox_center_v_norm": 0.48477511640394416,
+    "detector_confidence": 0.9800000000000002,
+    "is_missing": 0.0,
+    "is_interpolated": 0.0,
+    "physics_width_range_m": 258.7848385913693,
+    "physics_height_range_m": 259.8220523503334,
+    "physics_area_range_m": 259.30292686586085,
+    "fused_range_m": 259.3032726021618,
+    "mlp_predicted_residual_m": -0.0008646191948370346,
+    "raw_predicted_range_m": 259.302407982967,
+    "frame_delta_t_s": 0.042135156163165495
+  },
+  "std": {
+    "bbox_width_px": 26.111484762657373,
+    "bbox_height_px": 13.003623649102337,
+    "bbox_area_px": 1717.0921056597163,
+    "bbox_aspect_ratio": 1.1060296622836343e-07,
+    "bbox_center_u_norm": 0.002629112061779694,
+    "bbox_center_v_norm": 0.015726751679024948,
+    "detector_confidence": 1.0,
+    "is_missing": 1.0,
+    "is_interpolated": 1.0,
+    "physics_width_range_m": 138.19833133057833,
+    "physics_height_range_m": 138.75223243874817,
+    "physics_area_range_m": 138.47500492440074,
+    "fused_range_m": 138.47518956991783,
+    "mlp_predicted_residual_m": 0.0004621426803976746,
+    "raw_predicted_range_m": 138.47472853325402,
+    "frame_delta_t_s": 0.009729005564314754
+  }
+}

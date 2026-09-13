@@ -1,0 +1,47 @@
+﻿measurement_quality:
+  min_bbox_width_px: 3.0
+  min_bbox_height_px: 3.0
+  min_mask_area_px: 9.0
+  min_solidity: 0.85
+  max_component_count: 3
+  max_physics_disagreement_ratio: 0.5
+  min_aspect_ratio: 1.15
+
+motion_gate:
+  max_radial_speed_mps: 50.0
+  max_radial_acceleration_mps2: 25.0
+  innovation_sigma_gate: 3.0
+  downweight_threshold: 1.8
+  reject_threshold: 4.0
+
+tracking:
+  coasting_timeout_s: 0.4
+  lost_timeout_s: 1.0
+  reacquire_confirm_frames: 10
+  gru_warmup_frames: 25
+  min_uav_gate_range_m: 40.0
+  max_size_ratio: 2.5
+  max_uav_gate_range_m: 550.0
+  max_consecutive_reject_frames: 5
+
+
+
+filters:
+  median_short_window: 5
+  median_long_window: 25
+  ema_alpha: 0.15
+  kalman_process_noise: 0.25
+  kalman_measurement_noise: 25.0
+
+runtime:
+  use_actual_timestamps: true
+  scene_features: false
+  prohibit_fake_500m_clamp: true
+
+pose_correction:
+  enabled: true
+  min_long_axis_px: 15.0
+  full_long_axis_px: 25.0
+  min_aspect_ratio: 1.3
+  full_aspect_ratio: 1.8
+  projection_correction_alpha: 0.0

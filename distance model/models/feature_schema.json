@@ -1,0 +1,27 @@
+{
+  "feature_columns": [
+    "bbox_width_px",
+    "bbox_height_px",
+    "bbox_area_px",
+    "bbox_aspect_ratio",
+    "bbox_center_u_norm",
+    "bbox_center_v_norm",
+    "detector_confidence",
+    "is_missing",
+    "is_interpolated",
+    "physics_width_range_m",
+    "physics_height_range_m",
+    "physics_area_range_m",
+    "fused_range_m",
+    "mlp_predicted_residual_m",
+    "raw_predicted_range_m",
+    "frame_delta_t_s"
+  ],
+  "target_columns": [
+    "true_range_m"
+  ],
+  "primary_target": "true_range_m",
+  "input_dim": 16,
+  "sequence_length": 25,
+  "stride": 5
+}
