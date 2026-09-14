@@ -348,6 +348,7 @@ RID_UI_MAX_SPEED_MPS = _env_float("RID_UI_MAX_SPEED_MPS", 40.0)
 SPECIAL_RID_IDENTITY_ENABLED = _env_flag(
     "SPECIAL_RID_IDENTITY_ENABLED", True
 )
+SPECIAL_RID_UI_EXCLUSIVE = _env_flag("SPECIAL_RID_UI_EXCLUSIVE", True)
 SPECIAL_RID_UI_RATE_HZ = _env_float("SPECIAL_RID_UI_RATE_HZ", 5.0)
 SPECIAL_RID_MAX_PREDICTION_SECONDS = _env_float(
     "SPECIAL_RID_MAX_PREDICTION_SECONDS", 5.0
@@ -499,7 +500,7 @@ TRACK_REACQUIRE_MAX_DEG = _env_float("TRACK_REACQUIRE_MAX_DEG", 4.0)  # conserva
 ASSOCIATION_BLOCKED_COST = 1.0e6
 MAX_LOCK_LOST_FRAMES = _env_int("MAX_LOCK_LOST_FRAMES", 8)  # legacy log-only frame counter threshold
 TRACK_CONFIRM_HITS = _env_int("TRACK_CONFIRM_HITS", 3)  # internal SORT/KF confirmation threshold
-UI_TRACK_CONFIRM_HITS = _env_int("UI_TRACK_CONFIRM_HITS", 9)  # extra gate before exposing a UI ID
+UI_TRACK_CONFIRM_HITS = _env_int("UI_TRACK_CONFIRM_HITS", 7)  # extra gate before exposing a UI ID
 STRIKE_TRACK_CONFIRM_HITS = _env_int("STRIKE_TRACK_CONFIRM_HITS", UI_TRACK_CONFIRM_HITS)  # strike target is never exposed earlier than UI
 MASTER_SWITCH_SCORE_MARGIN = _env_float("MASTER_SWITCH_SCORE_MARGIN", 2.0)
 MASTER_SWITCH_CONFIRM_SECONDS = _env_float("MASTER_SWITCH_CONFIRM_SECONDS", 0.8)
@@ -2334,6 +2335,33 @@ def select_ui_tracks_for_display(active_tracks, now_t):
     ]
 
 
+def select_ordinary_ui_tracks_for_output(
+    ui_tracks,
+    owned_special_generations,
+    special_rid_ui_exclusive=False,
+):
+    """Filter the legacy UI path without changing tracking or strike inputs."""
+    if special_rid_ui_exclusive:
+        return []
+    return [
+        track
+        for track in ui_tracks
+        if not owned_special_generations
+        or should_send_sort_through_ordinary_ui(
+            track,
+            owned_special_generations,
+        )
+    ]
+
+
+def update_track_confirmation_flags(track):
+    """Promote a confirmed SORT track to the UI and strike output gates."""
+    if track.hit_streak >= UI_TRACK_CONFIRM_HITS:
+        track.ui_confirmed = True
+    if track.hit_streak >= STRIKE_TRACK_CONFIRM_HITS:
+        track.strike_confirmed = True
+
+
 def ui_threat_score_from_distance(distance_m):
     """Map a valid UI distance to the three RID threat tiers.
 
@@ -3840,6 +3868,7 @@ def main():
     print(
         "[Config] Special RID stable UI: "
         f"enabled={1 if SPECIAL_RID_IDENTITY_ENABLED else 0}, "
+        f"ui_exclusive={1 if SPECIAL_RID_UI_EXCLUSIVE else 0}, "
         f"rate={SPECIAL_RID_UI_RATE_HZ:.1f}Hz, "
         f"predict={SPECIAL_RID_MAX_PREDICTION_SECONDS:.1f}s, "
         f"rid_fresh={SPECIAL_RID_FRESH_SECONDS:.1f}s, "
@@ -4433,10 +4462,7 @@ def main():
                 and t.lost_seconds(curr_time) <= MAX_LOCK_LOST_SECONDS
             ]
             for t in valid_tracks:
-                if t.hit_streak >= UI_TRACK_CONFIRM_HITS:
-                    t.ui_confirmed = True
-                if t.hit_streak >= STRIKE_TRACK_CONFIRM_HITS:
-                    t.strike_confirmed = True
+                update_track_confirmation_flags(t)
             ui_tracks = select_ui_tracks_for_display(active_tracks, curr_time)
             # Cloud control requires both UI confirmation and the shorter
             # control-validity window; UI-only prediction bridging must not
@@ -5242,15 +5268,14 @@ def main():
                     if special_rid_registry is not None
                     else frozenset()
                 )
-                ordinary_ui_tracks = [
-                    track
-                    for track in ui_tracks
-                    if not owned_special_generations
-                    or should_send_sort_through_ordinary_ui(
-                        track,
-                        owned_special_generations,
-                    )
-                ]
+                ordinary_ui_tracks = select_ordinary_ui_tracks_for_output(
+                    ui_tracks,
+                    owned_special_generations,
+                    special_rid_ui_exclusive=(
+                        SPECIAL_RID_IDENTITY_ENABLED
+                        and SPECIAL_RID_UI_EXCLUSIVE
+                    ),
+                )
                 for t in ordinary_ui_tracks:
                     final_distance_state = final_distance_by_track.get(
                         int(t.id), {}

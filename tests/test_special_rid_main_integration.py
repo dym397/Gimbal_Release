@@ -55,9 +55,44 @@ def test_ordinary_ui_allocator_skips_reserved_special_ids():
     assert tracking.next_unreserved_ui_id(3, frozenset((1, 2))) == 3
 
 
-def test_ui_and_strike_track_confirmation_default_to_nine_hits():
-    assert tracking.UI_TRACK_CONFIRM_HITS == 9
-    assert tracking.STRIKE_TRACK_CONFIRM_HITS == 9
+def test_special_rid_exclusive_mode_blocks_all_ordinary_ui_tracks():
+    track = _Track()
+
+    selected = tracking.select_ordinary_ui_tracks_for_output(
+        [track],
+        owned_special_generations=set(),
+        special_rid_ui_exclusive=True,
+    )
+
+    assert selected == []
+
+
+def test_ordinary_ui_tracks_remain_available_when_exclusive_mode_is_off():
+    track = _Track()
+
+    selected = tracking.select_ordinary_ui_tracks_for_output(
+        [track],
+        owned_special_generations=set(),
+        special_rid_ui_exclusive=False,
+    )
+
+    assert selected == [track]
+
+
+def test_ui_and_strike_tracks_become_confirmed_on_seventh_hit():
+    track = _Track()
+    track.hit_streak = 6
+    track.ui_confirmed = False
+    track.strike_confirmed = False
+
+    tracking.update_track_confirmation_flags(track)
+    assert track.ui_confirmed is False
+    assert track.strike_confirmed is False
+
+    track.hit_streak = 7
+    tracking.update_track_confirmation_flags(track)
+    assert track.ui_confirmed is True
+    assert track.strike_confirmed is True
 
 
 def test_track_conversion_preserves_exact_generation_and_camera_source():
