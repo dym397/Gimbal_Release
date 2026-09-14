@@ -28,16 +28,16 @@ def test_strike_packet_appends_encoded_longitude_and_latitude():
         1234,
         3599,
         -123,
-        37_242_000,
-        10_062_000,
+        -570_767_296,
+        1_006_200_000,
     )
     assert packet[18] == tracking.StrikeSender._xor_checksum(packet[:18])
     assert packet[19:] == b"\x55\xAA"
 
 
-def test_coordinate_encoding_truncates_toward_zero_before_arcsecond_scale():
-    assert tracking.StrikeSender._encode_coordinate(103.456123) == 37_242_000
-    assert tracking.StrikeSender._encode_coordinate(-12.349) == -4_442_400
+def test_coordinate_encoding_uses_360000_scale_and_signed_int32_wrap():
+    assert tracking.StrikeSender._encode_coordinate(103.456123) == -570_767_296
+    assert tracking.StrikeSender._encode_coordinate(-12.349) == -444_240_000
 
 
 def _station_position_snapshot():

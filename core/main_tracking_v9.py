@@ -1437,8 +1437,11 @@ class StrikeSender:
         coordinate = float(coordinate_deg)
         if not math.isfinite(coordinate):
             raise ValueError(f"strike coordinate is not finite: {coordinate_deg}")
-        # Protocol requires truncation to 0.01 degree before scaling by 3600.
-        return int(Decimal(str(coordinate)) * Decimal("100")) * 3600
+        # Protocol truncates to 0.01 degree, scales by 360000, then keeps the
+        # low 32 bits so signed overflow has deterministic two's-complement
+        # behavior when packed as network-order int32.
+        scaled = int(Decimal(str(coordinate)) * Decimal("100")) * 360000
+        return ((scaled + (1 << 31)) % (1 << 32)) - (1 << 31)
 
     @classmethod
     def build_packet(
