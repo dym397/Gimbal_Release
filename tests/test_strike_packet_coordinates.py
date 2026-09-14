@@ -112,3 +112,29 @@ def test_periodic_sender_forwards_coordinates_from_snapshot():
         "longitude_deg": 103.456123,
         "latitude_deg": 27.950686,
     }]
+
+
+def test_periodic_sender_rejects_target_ids_outside_one_and_two():
+    sender = _CaptureStrikeSender()
+    hardware = tracking.SharedHardwareState()
+    hardware.is_settled = True
+    hardware.is_stationary = True
+    hardware.settled_track_id = 91
+    worker = tracking.PeriodicStrikeSender(
+        sender,
+        send_hz=10.0,
+        hardware_state=hardware,
+    )
+    worker.publish({
+        "internal_track_id": 91,
+        "target_id": 3,
+        "distance_m": 123.4,
+        "azimuth_deg": 359.9,
+        "elevation_deg": -12.3,
+        "longitude_deg": 103.456123,
+        "latitude_deg": 27.950686,
+        "valid_until": 101.0,
+    })
+
+    assert worker.send_once(now=100.0) is False
+    assert sender.calls == []

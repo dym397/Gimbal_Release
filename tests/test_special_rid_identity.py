@@ -869,7 +869,7 @@ def _ready_registry(
     sort_az=190.0,
     sort_el=30.0,
 ):
-    registry = SpecialRidRegistry(sort_fresh_s=4.0)
+    registry = SpecialRidRegistry(sort_fresh_s=6.0)
     rid_ts = now_ts - rid_age
     rid_item = _rid_at_angles(XDB_RID, rid_az, rid_el, rid_ts)
     registry.observe_rids([rid_item], now_ts=rid_ts)
@@ -921,17 +921,21 @@ def test_special_threat_boundary_matches_existing_ui_rule():
 @pytest.mark.parametrize(
     "rid_age,sort_age,expected",
     [
-        (7.0, 4.0, 1),
-        (7.001, 4.0, 0),
-        (7.0, 4.001, 0),
+        (7.0, 6.0, 1),
+        (7.001, 6.0, 0),
+        (7.0, 6.001, 0),
     ],
 )
-def test_special_ui_uses_independent_seven_and_four_second_gates(
+def test_special_ui_uses_independent_seven_and_six_second_gates(
     rid_age, sort_age, expected
 ):
     registry, _ = _ready_registry(rid_age=rid_age, sort_age=sort_age)
 
     assert len(registry.ui_statuses(now_ts=20.0, station=_station())) == expected
+
+
+def test_registry_default_sort_freshness_is_six_seconds():
+    assert SpecialRidRegistry().sort_fresh_s == 6.0
 
 
 class _RecordingSender:

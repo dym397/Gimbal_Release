@@ -439,7 +439,7 @@ class SpecialRidRegistry:
         predictor_factory=SpecialRidPredictor,
         log_callback=None,
         camera_theta=None,
-        sort_fresh_s=4.0,
+        sort_fresh_s=6.0,
         sort_internal_s=12.0,
         reacquire_delay_s=0.0,
     ):

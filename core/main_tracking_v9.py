@@ -53,6 +53,7 @@ try:
         SpecialRidRegistry,
         run_special_rid_ui_sender,
         should_send_sort_through_ordinary_ui,
+        sort_generation_from_track,
         sort_observation_from_track,
     )
 except ImportError:
@@ -61,6 +62,7 @@ except ImportError:
     SpecialRidRegistry = None
     run_special_rid_ui_sender = None
     should_send_sort_through_ordinary_ui = None
+    sort_generation_from_track = None
     sort_observation_from_track = None
 # ==========================================
 # 配置
@@ -355,7 +357,7 @@ SPECIAL_RID_MAX_PREDICTION_SECONDS = _env_float(
 )
 SPECIAL_RID_FRESH_SECONDS = _env_float("SPECIAL_RID_FRESH_SECONDS", 7.0)
 SPECIAL_RID_SORT_FRESH_SECONDS = _env_float(
-    "SPECIAL_RID_SORT_FRESH_SECONDS", 4.0
+    "SPECIAL_RID_SORT_FRESH_SECONDS", 6.0
 )
 SPECIAL_RID_REACQUIRE_DELAY_SECONDS = _env_float(
     "SPECIAL_RID_REACQUIRE_DELAY_SECONDS", 0.0
@@ -1624,6 +1626,12 @@ class PeriodicStrikeSender:
                 snapshot = dict(self.snapshot)
                 if now >= float(snapshot["valid_until"]):
                     return False
+                target_id = int(snapshot["target_id"])
+                if target_id not in SPECIAL_RID_UI_IDS:
+                    raise ValueError(
+                        f"strike target_id is not special RID ID 1/2: {target_id}"
+                    )
+                snapshot["target_id"] = target_id
                 with self.hardware_state.lock:
                     if not (
                         self.hardware_state.is_settled
@@ -2351,6 +2359,27 @@ def select_ordinary_ui_tracks_for_output(
             track,
             owned_special_generations,
         )
+    ]
+
+
+def special_rid_ui_id_for_track(track, special_rid_registry):
+    """Resolve an exact SORT generation to its special RID UI identity."""
+    if special_rid_registry is None or sort_generation_from_track is None:
+        return None
+    try:
+        slot = special_rid_registry.owner_of(sort_generation_from_track(track))
+        ui_id = int(slot.ui_id)
+    except (AttributeError, TypeError, ValueError, OverflowError):
+        return None
+    return ui_id if ui_id in SPECIAL_RID_UI_IDS else None
+
+
+def select_special_rid_strike_tracks(tracks, special_rid_registry):
+    """Keep only tracks owned by the two special RID identities for strike."""
+    return [
+        track
+        for track in tracks
+        if special_rid_ui_id_for_track(track, special_rid_registry) is not None
     ]
 
 
@@ -3869,6 +3898,7 @@ def main():
         "[Config] Special RID stable UI: "
         f"enabled={1 if SPECIAL_RID_IDENTITY_ENABLED else 0}, "
         f"ui_exclusive={1 if SPECIAL_RID_UI_EXCLUSIVE else 0}, "
+        f"strike_ids={sorted(SPECIAL_RID_UI_IDS)}, "
         f"rate={SPECIAL_RID_UI_RATE_HZ:.1f}Hz, "
         f"predict={SPECIAL_RID_MAX_PREDICTION_SECONDS:.1f}s, "
         f"rid_fresh={SPECIAL_RID_FRESH_SECONDS:.1f}s, "
@@ -4498,6 +4528,10 @@ def main():
                         "send_result": 0,
                         "skip_reason": f"sort_observation_error:{e}",
                     })
+            strike_valid_tracks = select_special_rid_strike_tracks(
+                strike_valid_tracks,
+                special_rid_registry,
+            )
             master_track = next((t for t in gimbal_tracks if t.id == master_id), None)
             prev_master_id = master_id
             master_lost = (prev_master_id is not None and master_track is None)
@@ -5162,7 +5196,14 @@ def main():
                 )
                 if strike_window_valid and strike_send_worker is not None:
                     try:
-                        strike_ui_id = get_or_assign_ui_id(strike_track)
+                        strike_ui_id = special_rid_ui_id_for_track(
+                            strike_track,
+                            special_rid_registry,
+                        )
+                        if strike_ui_id is None:
+                            raise ValueError(
+                                "strike target is not owned by special RID ID 1/2"
+                            )
 
                         # 1. 角度预测：主打击模型采用 6D CA (常加速度外推)，同时生成 CV (常速度) 预测用于影子比对与日志记录
                         strike_rel_az_ca, strike_el_ca = strike_track.get_shadow_future_position_ca(STRIKE_LEAD_TIME)

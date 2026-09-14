@@ -2,6 +2,7 @@ import csv
 import struct
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 
 CORE_DIR = Path(__file__).resolve().parents[1] / "core"
@@ -37,6 +38,15 @@ class _State:
             (3, 0): -0.5,
         }
         return values[index]
+
+
+class _SpecialRidOwnerRegistry:
+    def __init__(self, owners):
+        self.owners = dict(owners)
+
+    def owner_of(self, generation):
+        ui_id = self.owners.get(generation)
+        return None if ui_id is None else SimpleNamespace(ui_id=ui_id)
 
 
 def test_owned_special_sort_is_suppressed_from_ordinary_ui_path():
@@ -77,6 +87,34 @@ def test_ordinary_ui_tracks_remain_available_when_exclusive_mode_is_off():
     )
 
     assert selected == [track]
+
+
+def test_special_rid_sort_freshness_defaults_to_six_seconds():
+    assert tracking.SPECIAL_RID_SORT_FRESH_SECONDS == 6.0
+
+
+def test_strike_candidates_require_exact_special_sort_generation():
+    owned = _Track(sort_id=238, created_ts=100.5)
+    reused_sort_id = _Track(sort_id=238, created_ts=200.5)
+    unowned = _Track(sort_id=900, created_ts=201.0)
+    registry = _SpecialRidOwnerRegistry({SortGeneration(238, 100.5): 1})
+
+    selected = tracking.select_special_rid_strike_tracks(
+        [owned, reused_sort_id, unowned],
+        registry,
+    )
+
+    assert selected == [owned]
+    assert tracking.special_rid_ui_id_for_track(owned, registry) == 1
+    assert tracking.special_rid_ui_id_for_track(reused_sort_id, registry) is None
+
+
+def test_strike_candidates_reject_owner_ids_outside_one_and_two():
+    track = _Track(sort_id=238, created_ts=100.5)
+    registry = _SpecialRidOwnerRegistry({SortGeneration(238, 100.5): 3})
+
+    assert tracking.select_special_rid_strike_tracks([track], registry) == []
+    assert tracking.special_rid_ui_id_for_track(track, registry) is None
 
 
 def test_ui_and_strike_tracks_become_confirmed_on_seventh_hit():
