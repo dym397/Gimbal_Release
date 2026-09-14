@@ -55,6 +55,11 @@ def test_ordinary_ui_allocator_skips_reserved_special_ids():
     assert tracking.next_unreserved_ui_id(3, frozenset((1, 2))) == 3
 
 
+def test_ui_and_strike_track_confirmation_default_to_nine_hits():
+    assert tracking.UI_TRACK_CONFIRM_HITS == 9
+    assert tracking.STRIKE_TRACK_CONFIRM_HITS == 9
+
+
 def test_track_conversion_preserves_exact_generation_and_camera_source():
     observation = sort_observation_from_track(
         _Track(), map_azimuth=lambda relative: (relative + 180.0) % 360.0
