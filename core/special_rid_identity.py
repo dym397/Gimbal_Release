@@ -563,6 +563,11 @@ class SpecialRidRegistry:
         if not pending or not candidates:
             return []
 
+        # Under the staged-launch workflow, one fresh special RID and one
+        # confirmed unowned SORT are unambiguous even when SORT was created
+        # just before the RID registry observed its first packet.
+        force_singleton = len(pending) == 1 and len(candidates) == 1
+
         maximum = min(len(pending), len(candidates))
         for assignment_size in range(maximum, 0, -1):
             best = None
@@ -574,7 +579,10 @@ class SpecialRidRegistry:
                     total = 0.0
                     valid = True
                     for slot, observation in zip(slot_subset, candidate_subset):
-                        if observation.generation.created_ts < slot.pending_since:
+                        if (
+                            observation.generation.created_ts < slot.pending_since
+                            and not force_singleton
+                        ):
                             valid = False
                             break
                         rid_az, rid_el, _ = geometries[slot.rid_id]
@@ -603,7 +611,15 @@ class SpecialRidRegistry:
                 return best[1]
         return []
 
-    def _attach(self, slot, observation, now_ts, reason, angle_cost=math.nan):
+    def _attach(
+        self,
+        slot,
+        observation,
+        now_ts,
+        reason,
+        angle_cost=math.nan,
+        forced_binding=False,
+    ):
         generation = observation.generation
         owner = self._owners.get(generation)
         if owner is not None and owner != slot.rid_id:
@@ -636,7 +652,7 @@ class SpecialRidRegistry:
                 current_sort_id=generation.sort_id,
                 current_sort_created_ts=generation.created_ts,
                 angle_cost=angle_cost,
-                forced_binding=0,
+                forced_binding=1 if forced_binding else 0,
             )
         else:
             self._log(
@@ -1051,6 +1067,7 @@ class SpecialRidRegistry:
             assignments = self._registration_assignments(
                 pending, unowned, station, now_ts
             )
+            force_singleton = len(pending) == 1 and len(unowned) == 1
             assignments.sort(
                 key=lambda pair: (
                     pair[1].generation.created_ts,
@@ -1063,8 +1080,13 @@ class SpecialRidRegistry:
                     slot,
                     observation,
                     now_ts,
-                    reason="initial_nearest_2d_angle",
+                    reason=(
+                        "initial_single_rid_single_sort"
+                        if force_singleton
+                        else "initial_nearest_2d_angle"
+                    ),
                     angle_cost=angle_cost,
+                    forced_binding=force_singleton,
                 )
             for observation in observations:
                 owner_rid = self._owners.get(observation.generation)

@@ -500,11 +500,11 @@ MAX_LOCK_LOST_SECONDS = _env_float("MAX_LOCK_LOST_SECONDS", 1.6)  # external UI/
 UI_MAX_LOST_SECONDS = _env_float("UI_MAX_LOST_SECONDS", 3.0)  # tolerate detector dropouts for UI only; control/strike still use MAX_LOCK_LOST_SECONDS
 TRACK_ASSOCIATION_MAX_DEG = _env_float("TRACK_ASSOCIATION_MAX_DEG", 6.0)  # global hard cap for covariance-expanded association
 TRACK_REACQUIRE_STRICT_AFTER_SECONDS = _env_float("TRACK_REACQUIRE_STRICT_AFTER_SECONDS", 1.0)
-TRACK_REACQUIRE_MAX_DEG = _env_float("TRACK_REACQUIRE_MAX_DEG", 4.0)  # conservative long-gap cap; pairs at exactly 4.0 deg remain blocked
+TRACK_REACQUIRE_MAX_DEG = _env_float("TRACK_REACQUIRE_MAX_DEG", 5.0)  # replay-tuned long-gap cap; pairs at exactly 5.0 deg remain blocked
 ASSOCIATION_BLOCKED_COST = 1.0e6
 MAX_LOCK_LOST_FRAMES = _env_int("MAX_LOCK_LOST_FRAMES", 8)  # legacy log-only frame counter threshold
 TRACK_CONFIRM_HITS = _env_int("TRACK_CONFIRM_HITS", 3)  # internal SORT/KF confirmation threshold
-UI_TRACK_CONFIRM_HITS = _env_int("UI_TRACK_CONFIRM_HITS", 7)  # extra gate before exposing a UI ID
+UI_TRACK_CONFIRM_HITS = _env_int("UI_TRACK_CONFIRM_HITS", 16)  # extra gate before exposing a UI ID
 STRIKE_TRACK_CONFIRM_HITS = _env_int("STRIKE_TRACK_CONFIRM_HITS", UI_TRACK_CONFIRM_HITS)  # strike target is never exposed earlier than UI
 MASTER_SWITCH_SCORE_MARGIN = _env_float("MASTER_SWITCH_SCORE_MARGIN", 2.0)
 MASTER_SWITCH_CONFIRM_SECONDS = _env_float("MASTER_SWITCH_CONFIRM_SECONDS", 0.8)
@@ -1613,12 +1613,18 @@ class PeriodicStrikeSender:
         hardware_state,
         on_send=None,
         on_error=None,
+        allowed_target_ids=None,
     ):
         self.sender = sender
         self.interval = 1.0 / max(float(send_hz), 0.1)
         self.hardware_state = hardware_state
         self.on_send = on_send
         self.on_error = on_error
+        self.allowed_target_ids = frozenset(
+            SPECIAL_RID_UI_IDS
+            if allowed_target_ids is None
+            else (int(target_id) for target_id in allowed_target_ids)
+        )
         self.lock = threading.Lock()
         self.snapshots = {}
         self.stop_event = threading.Event()
@@ -1659,9 +1665,10 @@ class PeriodicStrikeSender:
         for snapshot in snapshots:
             try:
                 target_id = int(snapshot["target_id"])
-                if target_id not in SPECIAL_RID_UI_IDS:
+                if target_id not in self.allowed_target_ids:
                     raise ValueError(
-                        f"strike target_id is not special RID ID 1/2: {target_id}"
+                        "strike target_id is not enabled for this sender: "
+                        f"{target_id}, allowed={sorted(self.allowed_target_ids)}"
                     )
                 snapshot["target_id"] = target_id
                 if self.hardware_state is not None:
@@ -2414,6 +2421,23 @@ def select_special_rid_strike_tracks(tracks, special_rid_registry):
         track
         for track in tracks
         if special_rid_ui_id_for_track(track, special_rid_registry) is not None
+    ]
+
+
+def select_visual_strike_tracks(
+    tracks,
+    master_id,
+    special_rid_registry,
+    special_rid_ui_exclusive=False,
+):
+    """Return only the locked ordinary SORT eligible for visual strike output."""
+    if special_rid_ui_exclusive or master_id is None:
+        return []
+    return [
+        track
+        for track in tracks
+        if int(track.id) == int(master_id)
+        and special_rid_ui_id_for_track(track, special_rid_registry) is None
     ]
 
 
@@ -3930,12 +3954,42 @@ def main():
         if ENABLE_STRIKE_SEND
         else None
     )
-    # The legacy gimbal-gated strike path stays disabled. Strike output now
-    # mirrors the successfully sent special-RID UI status batch.
+    # Special RID output mirrors UI statuses directly. Visual output uses a
+    # separate worker because it retains the gimbal settled/stationary gate.
     strike_send_worker = None
     special_strike_send_worker = None
 
     if strike_sender is not None:
+        def log_visual_strike_send(snapshot, packet, send_ts):
+            if FIELD_LOGGER is not None:
+                FIELD_LOGGER.write_strike_timing(snapshot, packet, send_ts)
+            row = dict(snapshot["log_row"])
+            row["timestamp"] = f"{send_ts:.6f}"
+            row["reason"] = (
+                f"source=visual_sort_lock,packet={packet.hex(' ')}"
+            )
+            field_log_event(row)
+
+        def log_visual_strike_send_error(snapshot, exc, send_ts):
+            if PRINT_EVENT_LOGS:
+                print(f"[Strike][Warn] visual target skipped: {exc}")
+            row = dict(snapshot.get("error_log_row", {}))
+            row["timestamp"] = f"{send_ts:.6f}"
+            row["event"] = "STRIKE_SEND_SKIP"
+            row["reason"] = str(exc)
+            field_log_event(row)
+
+        if ENABLE_GIMBAL_VISION and not SPECIAL_RID_UI_EXCLUSIVE:
+            strike_send_worker = PeriodicStrikeSender(
+                strike_sender,
+                send_hz=STRIKE_SEND_HZ,
+                hardware_state=shared_state,
+                on_send=log_visual_strike_send,
+                on_error=log_visual_strike_send_error,
+                allowed_target_ids=ORDINARY_VISION_UI_IDS,
+            )
+            strike_send_worker.start()
+
         def log_special_strike_send(snapshot, packet, send_ts):
             if FIELD_LOGGER is not None:
                 FIELD_LOGGER.write_strike_timing(snapshot, packet, send_ts)
@@ -3961,6 +4015,7 @@ def main():
             hardware_state=None,
             on_send=log_special_strike_send,
             on_error=log_special_strike_send_error,
+            allowed_target_ids=SPECIAL_RID_UI_IDS,
         )
         special_strike_send_worker.start()
     station_position = SharedPositionState(
@@ -4034,11 +4089,14 @@ def main():
         f"reacquire_delay={SPECIAL_RID_REACQUIRE_DELAY_SECONDS:.1f}s"
     )
     if ENABLE_STRIKE_SEND:
+        strike_sources = "special_rid_ui_mirror"
+        if ENABLE_GIMBAL_VISION and not SPECIAL_RID_UI_EXCLUSIVE:
+            strike_sources += "+visual_sort_lock"
         print(
             f"[Strike] Enabled target UDP sender: {STRIKE_IP}:{STRIKE_PORT}, "
             f"source_port={STRIKE_SOURCE_PORT or 'dynamic'}, "
-            f"hz={STRIKE_SEND_HZ:.1f}, source=special_rid_ui_mirror, "
-            "gimbal_gate=disabled, legacy_strike_path=disabled"
+            f"hz={STRIKE_SEND_HZ:.1f}, source={strike_sources}, "
+            "gimbal_gate=visual_only"
         )
     if not USE_MOCK_GIMBAL:
         _validate_serial_port("GIMBAL_PORT", GIMBAL_PORT)
@@ -4243,10 +4301,13 @@ def main():
     ui_distance_mode = (
         "RID/visual runtime" if measurement_runtime is not None else "none"
     )
+    active_strike_sources = "special_rid_ui_mirror"
+    if ENABLE_GIMBAL_VISION and not SPECIAL_RID_UI_EXCLUSIVE:
+        active_strike_sources += "+visual_sort_lock"
     print(
         f"[Init] UI ranging runtime: {ui_distance_mode} "
         f"(ttl={TRACK_DISTANCE_TTL:.1f}s); "
-        "strike source=special_rid_ui_mirror"
+        f"strike source={active_strike_sources}"
     )
     print("=== System V9.0 (Predictive Tracking & Scheduling) Running ===")
 
@@ -4655,6 +4716,13 @@ def main():
             station_snapshot = station_position.snapshot(curr_time)
             if special_rid_registry is not None:
                 try:
+                    # Refresh synchronously before SORT ownership is decided.
+                    # This prevents the ordinary visual path from publishing
+                    # ID 3 while the 5 Hz RID sender thread is between cycles.
+                    special_rid_registry.observe_rids(
+                        special_rid_snapshot_provider(),
+                        now_ts=curr_time,
+                    )
                     special_sort_observations = [
                         sort_observation_from_track(
                             track,
@@ -4689,10 +4757,6 @@ def main():
                         "send_result": 0,
                         "skip_reason": f"sort_observation_error:{e}",
                     })
-            strike_valid_tracks = select_special_rid_strike_tracks(
-                strike_valid_tracks,
-                special_rid_registry,
-            )
             master_track = next((t for t in gimbal_tracks if t.id == master_id), None)
             prev_master_id = master_id
             master_lost = (prev_master_id is not None and master_track is None)
@@ -5069,6 +5133,15 @@ def main():
                 # RID-only delivery must not depend on a vision bbox that is
                 # intentionally unavailable when visual ranging is disabled.
                 track_results_for_strike = final_distance_by_track
+            strike_valid_tracks = select_visual_strike_tracks(
+                strike_valid_tracks,
+                master_id=master_id,
+                special_rid_registry=special_rid_registry,
+                special_rid_ui_exclusive=(
+                    SPECIAL_RID_IDENTITY_ENABLED
+                    and SPECIAL_RID_UI_EXCLUSIVE
+                ),
+            )
             current_strike_track = next(
                 (t for t in strike_valid_tracks if t.id == strike_track_id),
                 None,
@@ -5264,11 +5337,9 @@ def main():
                     if strike_track_id is not None
                     else {}
                 )
-                strike_distance_result = (
-                    final_distance_by_track.get(int(strike_track_id), {})
-                    if strike_track_id is not None
-                    else {}
-                )
+                # Visual strike output must use the fresh gimbal-camera
+                # measurement, not the RID/vision arbitration result.
+                strike_distance_result = dict(strike_track_result)
                 strike_gate_result = (
                     strike_track_result
                     if ENABLE_GIMBAL_VISION
@@ -5370,13 +5441,10 @@ def main():
                 )
                 if strike_window_valid and strike_send_worker is not None:
                     try:
-                        strike_ui_id = special_rid_ui_id_for_track(
-                            strike_track,
-                            special_rid_registry,
-                        )
-                        if strike_ui_id is None:
+                        strike_ui_id = get_or_assign_ui_id(strike_track)
+                        if strike_ui_id not in ORDINARY_VISION_UI_IDS:
                             raise ValueError(
-                                "strike target is not owned by special RID ID 1/2"
+                                "visual strike target has no ordinary UI ID 3/4/5"
                             )
 
                         # 1. 角度预测：主打击模型采用 6D CA (常加速度外推)，同时生成 CV (常速度) 预测用于影子比对与日志记录
@@ -5390,8 +5458,8 @@ def main():
                         strike_map_az = strike_map_az_ca
 
                         # 2. 距离处理：使用 Distance-KF 滤波器平滑去噪，但不作远期速度预测外推，若超过 3s 未更新则安全退回静态基准
-                        # Distance uses only the current track's fresh
-                        # final result from target_measurement_runtime.
+                        # Distance uses only the current track's fresh visual
+                        # result from target_measurement_runtime.
                         strike_smooth_dist = float(
                             strike_distance_result.get("distance", math.nan)
                         )

@@ -159,6 +159,10 @@ def test_special_rid_sort_freshness_defaults_to_six_seconds():
     assert tracking.SPECIAL_RID_SORT_FRESH_SECONDS == 6.0
 
 
+def test_sort_reacquire_gate_defaults_to_five_degrees():
+    assert tracking.TRACK_REACQUIRE_MAX_DEG == 5.0
+
+
 def test_strike_candidates_require_exact_special_sort_generation():
     owned = _Track(sort_id=238, created_ts=100.5)
     reused_sort_id = _Track(sort_id=238, created_ts=200.5)
@@ -183,9 +187,38 @@ def test_strike_candidates_reject_owner_ids_outside_one_and_two():
     assert tracking.special_rid_ui_id_for_track(track, registry) is None
 
 
-def test_ui_and_strike_tracks_become_confirmed_on_seventh_hit():
+def test_visual_strike_candidates_use_only_locked_unowned_sort():
+    special = _Track(sort_id=238, created_ts=100.5)
+    locked_visual = _Track(sort_id=239, created_ts=100.6)
+    other_visual = _Track(sort_id=240, created_ts=100.7)
+    registry = _SpecialRidOwnerRegistry({SortGeneration(238, 100.5): 1})
+
+    selected = tracking.select_visual_strike_tracks(
+        [special, locked_visual, other_visual],
+        master_id=239,
+        special_rid_registry=registry,
+        special_rid_ui_exclusive=False,
+    )
+
+    assert selected == [locked_visual]
+
+
+def test_visual_strike_candidates_are_disabled_by_exclusive_mode():
+    locked_visual = _Track(sort_id=239, created_ts=100.6)
+
+    selected = tracking.select_visual_strike_tracks(
+        [locked_visual],
+        master_id=239,
+        special_rid_registry=_SpecialRidOwnerRegistry({}),
+        special_rid_ui_exclusive=True,
+    )
+
+    assert selected == []
+
+
+def test_ui_and_strike_tracks_become_confirmed_on_sixteenth_hit():
     track = _Track()
-    track.hit_streak = 6
+    track.hit_streak = 15
     track.ui_confirmed = False
     track.strike_confirmed = False
 
@@ -193,7 +226,7 @@ def test_ui_and_strike_tracks_become_confirmed_on_seventh_hit():
     assert track.ui_confirmed is False
     assert track.strike_confirmed is False
 
-    track.hit_streak = 7
+    track.hit_streak = 16
     tracking.update_track_confirmation_flags(track)
     assert track.ui_confirmed is True
     assert track.strike_confirmed is True

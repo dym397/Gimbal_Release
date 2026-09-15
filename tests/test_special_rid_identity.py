@@ -290,21 +290,64 @@ def test_initial_binding_uses_wrapped_azimuth_plus_elevation_distance():
     assert registry.slot_for_rid(TEST_RID_LASER_A).current_sort.sort_id == 1
 
 
-def test_non_whitelisted_rid_and_preexisting_sort_are_not_registered():
+def test_non_whitelisted_rid_is_not_registered():
     registry = _rid_laser_registry()
     registry.observe_rids(
         [_rid_at_angles("RID-OTHER", 15.0, 3.0, 10.0)], now_ts=10.0
     )
     assert registry.slot_for_rid("RID-OTHER") is None
 
+
+def test_single_pending_rid_force_binds_single_preexisting_sort():
+    registry = _rid_laser_registry()
     registry.observe_rids(
         [_rid_at_angles(TEST_RID_LASER_A, 15.0, 3.0, 10.0)], now_ts=10.0
     )
     registry.observe_sorts(
-        [_sort_observation(9, azimuth=15.0, elevation=3.0, created_ts=9.0)],
+        [
+            _sort_observation(
+                9,
+                azimuth=80.0,
+                elevation=20.0,
+                created_ts=9.0,
+                last_detection_ts=11.0,
+            )
+        ],
         _station(),
         now_ts=11.0,
     )
+
+    slot = registry.slot_for_rid(TEST_RID_LASER_A)
+    assert slot.ui_id == 1
+    assert slot.current_sort.sort_id == 9
+
+
+def test_single_pending_rid_does_not_force_bind_when_two_old_sorts_exist():
+    registry = _rid_laser_registry()
+    registry.observe_rids(
+        [_rid_at_angles(TEST_RID_LASER_A, 15.0, 3.0, 10.0)], now_ts=10.0
+    )
+    registry.observe_sorts(
+        [
+            _sort_observation(
+                8,
+                azimuth=15.0,
+                elevation=3.0,
+                created_ts=8.0,
+                last_detection_ts=11.0,
+            ),
+            _sort_observation(
+                9,
+                azimuth=16.0,
+                elevation=4.0,
+                created_ts=9.0,
+                last_detection_ts=11.0,
+            ),
+        ],
+        _station(),
+        now_ts=11.0,
+    )
+
     assert registry.slot_for_rid(TEST_RID_LASER_A).ui_id is None
 
 
