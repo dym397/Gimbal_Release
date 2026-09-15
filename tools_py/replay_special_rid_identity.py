@@ -19,7 +19,7 @@ CORE_DIR = ROOT_DIR / "core"
 if str(CORE_DIR) not in sys.path:
     sys.path.insert(0, str(CORE_DIR))
 
-from special_rid_identity import (  # noqa: E402
+from track_binding_registry import (  # noqa: E402
     SortGeneration,
     SortObservation,
     SpecialRidRegistry,

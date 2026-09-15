@@ -47,7 +47,7 @@ try:
 except ImportError:
     TargetMeasurementRuntime = None
 try:
-    from special_rid_identity import (
+    from track_binding_registry import (
         SPECIAL_RID_UI_IDS,
         SpecialRidPredictor,
         SpecialRidRegistry,

@@ -11,7 +11,7 @@ CORE_DIR = Path(__file__).resolve().parents[1] / "core"
 sys.path.insert(0, str(CORE_DIR))
 
 import main_tracking_v9 as tracking  # noqa: E402
-from special_rid_identity import (  # noqa: E402
+from track_binding_registry import (  # noqa: E402
     SortGeneration,
     should_send_sort_through_ordinary_ui,
     sort_observation_from_track,

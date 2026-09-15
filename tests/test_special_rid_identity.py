@@ -9,7 +9,7 @@ import pytest
 CORE_DIR = Path(__file__).resolve().parents[1] / "core"
 sys.path.insert(0, str(CORE_DIR))
 
-from special_rid_identity import (  # noqa: E402
+from track_binding_registry import (  # noqa: E402
     SortGeneration,
     SortObservation,
     SpecialRidPredictor,
