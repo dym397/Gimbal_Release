@@ -3,6 +3,7 @@
 本目录是板端可运行的交付副本，运行入口为 run_main_tracking.sh。RID 身份关联、RID 轨迹、视觉测距和距离裁决实现编译为 CPython 扩展，源码不随交付目录提供：
 
 - core/target_measurement_runtime*.so
+- core/target_identity_core*.so（RID_laser摘要匹配，不含真实RID明文）
 - core/gimbal_vision_ranging*.so
 - distance model/src/uav_distance_pipeline/runtime_motion_gate*.so
 
