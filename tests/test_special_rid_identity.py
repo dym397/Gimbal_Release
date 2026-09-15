@@ -1,3 +1,4 @@
+import hashlib
 import math
 import sys
 from pathlib import Path
@@ -9,17 +10,29 @@ CORE_DIR = Path(__file__).resolve().parents[1] / "core"
 sys.path.insert(0, str(CORE_DIR))
 
 from special_rid_identity import (  # noqa: E402
-    ST22Q_RID,
-    XDB_RID,
     SortGeneration,
     SortObservation,
     SpecialRidPredictor,
-    SpecialRidRegistry,
+    SpecialRidRegistry as _SpecialRidRegistry,
     run_special_rid_ui_sender,
 )
 
 
 EARTH_RADIUS_M = 6_371_008.8
+TEST_RID_LASER_A = "TEST-RID-LASER-A"
+TEST_RID_LASER_B = "TEST-RID-LASER-B"
+
+
+def _test_rid_laser_digests():
+    return frozenset(
+        hashlib.sha256(value.encode("utf-8")).digest()
+        for value in (TEST_RID_LASER_A, TEST_RID_LASER_B)
+    )
+
+
+def _rid_laser_registry(**kwargs):
+    kwargs.setdefault("rid_laser_digests", _test_rid_laser_digests())
+    return _SpecialRidRegistry(**kwargs)
 
 
 def _longitude_offset_m(east_m, latitude=30.0, base_longitude=104.0):
@@ -37,6 +50,7 @@ def _rid_snapshot(
     speed=10.0,
     heading=90.0,
     vertical_speed=0.0,
+    height=50.0,
 ):
     sample = {
         "measurement_seq": measurement_seq,
@@ -55,6 +69,7 @@ def _rid_snapshot(
         "measurement_seq": measurement_seq,
         "measurement_count": measurement_seq,
         "measurement_history": [sample],
+        "height": height,
         "horizontal_speed": speed,
         "vertical_speed": vertical_speed,
         "track_heading": heading,
@@ -112,7 +127,7 @@ def test_latest_top_level_vertical_speed_is_used_when_compiled_history_omits_it(
 
     point = predictor.predict(12.0)
 
-    assert point.altitude_m == pytest.approx(505.0, abs=0.2)
+    assert point.relative_height_m == pytest.approx(55.0, abs=0.2)
 
 
 def _station():
@@ -141,7 +156,7 @@ def _rid_at_angles(
     )
     sample = snapshot["measurement_history"][0]
     sample["latitude"] = 30.0 + math.degrees(north_m / EARTH_RADIUS_M)
-    sample["alt_geo"] = 450.0 + math.tan(math.radians(elevation)) * horizontal_m
+    snapshot["height"] = math.tan(math.radians(elevation)) * horizontal_m
     return snapshot
 
 
@@ -159,6 +174,7 @@ def _sort_observation(
     hit_streak=20,
     velocity_az=0.0,
     velocity_el=0.0,
+    replaced_visual_ui_id=0,
 ):
     return SortObservation(
         generation=SortGeneration(sort_id, created_ts),
@@ -174,13 +190,31 @@ def _sort_observation(
             created_ts if last_detection_ts is None else last_detection_ts
         ),
         hit_streak=hit_streak,
+        replaced_visual_ui_id=replaced_visual_ui_id,
     )
 
 
-def test_first_successfully_bound_rid_gets_one_even_when_it_is_st22q():
-    registry = SpecialRidRegistry()
+def test_registry_accepts_only_rids_in_configured_rid_laser_digest_whitelist():
+    registry = _rid_laser_registry(
+        rid_laser_digests=_test_rid_laser_digests()
+    )
+
     registry.observe_rids(
-        [_rid_at_angles(ST22Q_RID, 20.0, 9.0, 10.0)], now_ts=10.0
+        [
+            _rid_at_angles(TEST_RID_LASER_A, 15.0, 3.0, 10.0),
+            _rid_at_angles("UNLISTED-RID", 30.0, 8.0, 10.0),
+        ],
+        now_ts=10.0,
+    )
+
+    assert registry.slot_for_rid(TEST_RID_LASER_A) is not None
+    assert registry.slot_for_rid("UNLISTED-RID") is None
+
+
+def test_first_successfully_bound_rid_gets_one_even_when_it_is_rid_laser_2():
+    registry = _rid_laser_registry()
+    registry.observe_rids(
+        [_rid_at_angles(TEST_RID_LASER_B, 20.0, 9.0, 10.0)], now_ts=10.0
     )
 
     registry.observe_sorts(
@@ -189,13 +223,13 @@ def test_first_successfully_bound_rid_gets_one_even_when_it_is_st22q():
         now_ts=11.0,
     )
 
-    assert registry.slot_for_rid(ST22Q_RID).ui_id == 1
+    assert registry.slot_for_rid(TEST_RID_LASER_B).ui_id == 1
 
 
 def test_confirmed_but_not_ui_confirmed_sort_cannot_register():
-    registry = SpecialRidRegistry()
+    registry = _rid_laser_registry()
     registry.observe_rids(
-        [_rid_at_angles(XDB_RID, 15.0, 3.0, 10.0)], now_ts=10.0
+        [_rid_at_angles(TEST_RID_LASER_A, 15.0, 3.0, 10.0)], now_ts=10.0
     )
 
     registry.observe_sorts(
@@ -212,13 +246,13 @@ def test_confirmed_but_not_ui_confirmed_sort_cannot_register():
         now_ts=11.0,
     )
 
-    assert registry.slot_for_rid(XDB_RID).ui_id is None
+    assert registry.slot_for_rid(TEST_RID_LASER_A).ui_id is None
 
 
 def test_two_rids_receive_one_and_two_in_successful_binding_order():
-    registry = SpecialRidRegistry()
+    registry = _rid_laser_registry()
     registry.observe_rids(
-        [_rid_at_angles(XDB_RID, 15.0, 3.0, 10.0)], now_ts=10.0
+        [_rid_at_angles(TEST_RID_LASER_A, 15.0, 3.0, 10.0)], now_ts=10.0
     )
     registry.observe_sorts(
         [_sort_observation(177, azimuth=15.0, elevation=3.0, created_ts=10.5)],
@@ -226,7 +260,7 @@ def test_two_rids_receive_one_and_two_in_successful_binding_order():
         now_ts=11.0,
     )
     registry.observe_rids(
-        [_rid_at_angles(ST22Q_RID, 30.0, 8.0, 20.0)], now_ts=20.0
+        [_rid_at_angles(TEST_RID_LASER_B, 30.0, 8.0, 20.0)], now_ts=20.0
     )
     registry.observe_sorts(
         [_sort_observation(189, azimuth=30.0, elevation=8.0, created_ts=20.5)],
@@ -234,14 +268,14 @@ def test_two_rids_receive_one_and_two_in_successful_binding_order():
         now_ts=21.0,
     )
 
-    assert registry.slot_for_rid(XDB_RID).ui_id == 1
-    assert registry.slot_for_rid(ST22Q_RID).ui_id == 2
+    assert registry.slot_for_rid(TEST_RID_LASER_A).ui_id == 1
+    assert registry.slot_for_rid(TEST_RID_LASER_B).ui_id == 2
 
 
 def test_initial_binding_uses_wrapped_azimuth_plus_elevation_distance():
-    registry = SpecialRidRegistry()
+    registry = _rid_laser_registry()
     registry.observe_rids(
-        [_rid_at_angles(XDB_RID, 359.0, 10.0, 10.0)], now_ts=10.0
+        [_rid_at_angles(TEST_RID_LASER_A, 359.0, 10.0, 10.0)], now_ts=10.0
     )
 
     registry.observe_sorts(
@@ -253,33 +287,33 @@ def test_initial_binding_uses_wrapped_azimuth_plus_elevation_distance():
         now_ts=11.0,
     )
 
-    assert registry.slot_for_rid(XDB_RID).current_sort.sort_id == 1
+    assert registry.slot_for_rid(TEST_RID_LASER_A).current_sort.sort_id == 1
 
 
 def test_non_whitelisted_rid_and_preexisting_sort_are_not_registered():
-    registry = SpecialRidRegistry()
+    registry = _rid_laser_registry()
     registry.observe_rids(
         [_rid_at_angles("RID-OTHER", 15.0, 3.0, 10.0)], now_ts=10.0
     )
     assert registry.slot_for_rid("RID-OTHER") is None
 
     registry.observe_rids(
-        [_rid_at_angles(XDB_RID, 15.0, 3.0, 10.0)], now_ts=10.0
+        [_rid_at_angles(TEST_RID_LASER_A, 15.0, 3.0, 10.0)], now_ts=10.0
     )
     registry.observe_sorts(
         [_sort_observation(9, azimuth=15.0, elevation=3.0, created_ts=9.0)],
         _station(),
         now_ts=11.0,
     )
-    assert registry.slot_for_rid(XDB_RID).ui_id is None
+    assert registry.slot_for_rid(TEST_RID_LASER_A).ui_id is None
 
 
 def test_registration_ignores_old_candidate_and_still_binds_available_new_sort():
-    registry = SpecialRidRegistry()
+    registry = _rid_laser_registry()
     registry.observe_rids(
         [
-            _rid_at_angles(XDB_RID, 15.0, 3.0, 10.0),
-            _rid_at_angles(ST22Q_RID, 30.0, 8.0, 10.0),
+            _rid_at_angles(TEST_RID_LASER_A, 15.0, 3.0, 10.0),
+            _rid_at_angles(TEST_RID_LASER_B, 30.0, 8.0, 10.0),
         ],
         now_ts=10.0,
     )
@@ -295,14 +329,14 @@ def test_registration_ignores_old_candidate_and_still_binds_available_new_sort()
 
     registered = registry.registered_slots()
     assert len(registered) == 1
-    assert registered[0].rid_id == ST22Q_RID
+    assert registered[0].rid_id == TEST_RID_LASER_B
     assert registered[0].current_sort.sort_id == 91
 
 
 def test_preexisting_sort_cannot_be_absorbed_as_registered_slot_successor():
-    registry = SpecialRidRegistry()
+    registry = _rid_laser_registry()
     registry.observe_rids(
-        [_rid_at_angles(XDB_RID, 15.0, 3.0, 10.0)], now_ts=10.0
+        [_rid_at_angles(TEST_RID_LASER_A, 15.0, 3.0, 10.0)], now_ts=10.0
     )
 
     registry.observe_sorts(
@@ -326,14 +360,14 @@ def test_preexisting_sort_cannot_be_absorbed_as_registered_slot_successor():
         now_ts=11.0,
     )
 
-    assert registry.slot_for_rid(XDB_RID).current_sort.sort_id == 91
+    assert registry.slot_for_rid(TEST_RID_LASER_A).current_sort.sort_id == 91
     assert registry.owner_of_sort_id(90) is None
 
 
 def _registry_with_two_registered_slots():
-    registry = SpecialRidRegistry(sort_fresh_s=4.0, reacquire_delay_s=0.0)
+    registry = _rid_laser_registry(sort_fresh_s=4.0, reacquire_delay_s=0.0)
     registry.observe_rids(
-        [_rid_at_angles(XDB_RID, 15.0, 3.0, 1.0)], now_ts=1.0
+        [_rid_at_angles(TEST_RID_LASER_A, 15.0, 3.0, 1.0)], now_ts=1.0
     )
     registry.observe_sorts(
         [_sort_observation(177, azimuth=15.0, elevation=3.0, created_ts=1.1)],
@@ -341,7 +375,7 @@ def _registry_with_two_registered_slots():
         now_ts=1.2,
     )
     registry.observe_rids(
-        [_rid_at_angles(ST22Q_RID, 100.0, 10.0, 2.0)], now_ts=2.0
+        [_rid_at_angles(TEST_RID_LASER_B, 100.0, 10.0, 2.0)], now_ts=2.0
     )
     registry.observe_sorts(
         [_sort_observation(189, azimuth=100.0, elevation=10.0, created_ts=2.1)],
@@ -357,7 +391,7 @@ def test_log_chain_189_196_202_205_238_becomes_one_family():
     registry.observe_rids(
         [
             _rid_at_angles(
-                ST22Q_RID,
+                TEST_RID_LASER_B,
                 101.49,
                 10.0,
                 34.7,
@@ -433,7 +467,7 @@ def test_log_chain_189_196_202_205_238_becomes_one_family():
     registry.observe_rids(
         [
             _rid_at_angles(
-                ST22Q_RID,
+                TEST_RID_LASER_B,
                 114.2,
                 10.0,
                 44.5,
@@ -484,15 +518,15 @@ def test_log_chain_189_196_202_205_238_becomes_one_family():
 
     family_ids = {
         generation.sort_id
-        for generation in registry.slot_for_rid(ST22Q_RID).sort_family
+        for generation in registry.slot_for_rid(TEST_RID_LASER_B).sort_family
     }
     assert {189, 196, 202, 205, 238} <= family_ids
 
 
 def test_fresh_slot_cannot_absorb_normal_successor_needed_by_missing_slot():
-    registry = SpecialRidRegistry(sort_fresh_s=4.0)
+    registry = _rid_laser_registry(sort_fresh_s=4.0)
     registry.observe_rids(
-        [_rid_at_angles(XDB_RID, 14.0, 4.0, 1.0)], now_ts=1.0
+        [_rid_at_angles(TEST_RID_LASER_A, 14.0, 4.0, 1.0)], now_ts=1.0
     )
     registry.observe_sorts(
         [_sort_observation(177, azimuth=14.0, elevation=4.0, created_ts=1.1)],
@@ -500,7 +534,7 @@ def test_fresh_slot_cannot_absorb_normal_successor_needed_by_missing_slot():
         now_ts=1.2,
     )
     registry.observe_rids(
-        [_rid_at_angles(ST22Q_RID, 14.0, 10.0, 2.0)], now_ts=2.0
+        [_rid_at_angles(TEST_RID_LASER_B, 14.0, 10.0, 2.0)], now_ts=2.0
     )
     registry.observe_sorts(
         [_sort_observation(189, azimuth=14.0, elevation=10.0, created_ts=2.1)],
@@ -510,7 +544,7 @@ def test_fresh_slot_cannot_absorb_normal_successor_needed_by_missing_slot():
     registry.observe_rids(
         [
             _rid_at_angles(
-                ST22Q_RID,
+                TEST_RID_LASER_B,
                 14.0,
                 10.0,
                 10.0,
@@ -540,13 +574,13 @@ def test_fresh_slot_cannot_absorb_normal_successor_needed_by_missing_slot():
         now_ts=10.0,
     )
 
-    assert registry.owner_of_sort_id(196).rid_id == ST22Q_RID
+    assert registry.owner_of_sort_id(196).rid_id == TEST_RID_LASER_B
 
 
 def test_stale_unowned_sort_is_not_attached_after_current_source_expires():
-    registry = SpecialRidRegistry(sort_fresh_s=4.0)
+    registry = _rid_laser_registry(sort_fresh_s=4.0)
     registry.observe_rids(
-        [_rid_at_angles(ST22Q_RID, 100.0, 10.0, 1.0)], now_ts=1.0
+        [_rid_at_angles(TEST_RID_LASER_B, 100.0, 10.0, 1.0)], now_ts=1.0
     )
     registry.observe_sorts(
         [_sort_observation(189, azimuth=100.0, elevation=10.0, created_ts=1.1)],
@@ -571,7 +605,7 @@ def test_stale_unowned_sort_is_not_attached_after_current_source_expires():
     assert registry.owner_of_sort_id(196) is None
 
 
-def test_owned_sort_238_cannot_be_stolen_by_xdb_after_forced_timeout():
+def test_owned_sort_238_cannot_be_stolen_by_rid_laser_1_after_forced_timeout():
     registry = _registry_with_two_registered_slots()
     registry.observe_sorts(
         [
@@ -586,7 +620,7 @@ def test_owned_sort_238_cannot_be_stolen_by_xdb_after_forced_timeout():
         _station(),
         now_ts=2.5,
     )
-    assert registry.owner_of_sort_id(238).rid_id == ST22Q_RID
+    assert registry.owner_of_sort_id(238).rid_id == TEST_RID_LASER_B
 
     registry.observe_sorts(
         [
@@ -602,14 +636,14 @@ def test_owned_sort_238_cannot_be_stolen_by_xdb_after_forced_timeout():
         now_ts=60.0,
     )
 
-    assert registry.owner_of_sort_id(238).rid_id == ST22Q_RID
+    assert registry.owner_of_sort_id(238).rid_id == TEST_RID_LASER_B
     assert registry.ownership_reject_count >= 1
 
 
 def test_current_sort_is_sticky_for_four_seconds_then_switches():
-    registry = SpecialRidRegistry(sort_fresh_s=4.0)
+    registry = _rid_laser_registry(sort_fresh_s=4.0)
     registry.observe_rids(
-        [_rid_at_angles(ST22Q_RID, 100.0, 10.0, 19.0)], now_ts=19.0
+        [_rid_at_angles(TEST_RID_LASER_B, 100.0, 10.0, 19.0)], now_ts=19.0
     )
     registry.observe_sorts(
         [
@@ -639,15 +673,15 @@ def test_current_sort_is_sticky_for_four_seconds_then_switches():
     )
 
     registry.select_current_sorts(now_ts=23.9)
-    assert registry.slot_for_rid(ST22Q_RID).current_sort.sort_id == 196
+    assert registry.slot_for_rid(TEST_RID_LASER_B).current_sort.sort_id == 196
     registry.select_current_sorts(now_ts=24.1)
-    assert registry.slot_for_rid(ST22Q_RID).current_sort.sort_id == 202
+    assert registry.slot_for_rid(TEST_RID_LASER_B).current_sort.sort_id == 202
 
 
 def test_stale_current_sort_immediately_reacquires_unique_far_sort():
-    registry = SpecialRidRegistry(sort_fresh_s=4.0, reacquire_delay_s=0.0)
+    registry = _rid_laser_registry(sort_fresh_s=4.0, reacquire_delay_s=0.0)
     registry.observe_rids(
-        [_rid_at_angles(ST22Q_RID, 100.0, 10.0, 9.0)], now_ts=9.0
+        [_rid_at_angles(TEST_RID_LASER_B, 100.0, 10.0, 9.0)], now_ts=9.0
     )
     registry.observe_sorts(
         [
@@ -677,14 +711,14 @@ def test_stale_current_sort_immediately_reacquires_unique_far_sort():
         now_ts=14.1,
     )
 
-    assert registry.owner_of_sort_id(900).rid_id == ST22Q_RID
-    assert registry.slot_for_rid(ST22Q_RID).current_sort.sort_id == 900
+    assert registry.owner_of_sort_id(900).rid_id == TEST_RID_LASER_B
+    assert registry.slot_for_rid(TEST_RID_LASER_B).current_sort.sort_id == 900
 
 
 def test_stale_reacquire_uses_current_rid_not_old_false_sort_geometry():
-    registry = SpecialRidRegistry(sort_fresh_s=4.0, reacquire_delay_s=0.0)
+    registry = _rid_laser_registry(sort_fresh_s=4.0, reacquire_delay_s=0.0)
     registry.observe_rids(
-        [_rid_at_angles(ST22Q_RID, 100.0, 10.0, 9.0)], now_ts=9.0
+        [_rid_at_angles(TEST_RID_LASER_B, 100.0, 10.0, 9.0)], now_ts=9.0
     )
     registry.observe_sorts(
         [
@@ -721,15 +755,15 @@ def test_stale_reacquire_uses_current_rid_not_old_false_sort_geometry():
         now_ts=14.2,
     )
 
-    assert registry.owner_of_sort_id(900).rid_id == ST22Q_RID
+    assert registry.owner_of_sort_id(900).rid_id == TEST_RID_LASER_B
     assert registry.owner_of_sort_id(901) is None
-    assert registry.slot_for_rid(ST22Q_RID).current_sort.sort_id == 900
+    assert registry.slot_for_rid(TEST_RID_LASER_B).current_sort.sort_id == 900
 
 
 def test_fresh_current_sort_keeps_far_unowned_candidate_unassigned():
-    registry = SpecialRidRegistry(sort_fresh_s=4.0, reacquire_delay_s=0.0)
+    registry = _rid_laser_registry(sort_fresh_s=4.0, reacquire_delay_s=0.0)
     registry.observe_rids(
-        [_rid_at_angles(ST22Q_RID, 100.0, 10.0, 9.0)], now_ts=9.0
+        [_rid_at_angles(TEST_RID_LASER_B, 100.0, 10.0, 9.0)], now_ts=9.0
     )
     registry.observe_sorts(
         [
@@ -760,13 +794,13 @@ def test_fresh_current_sort_keeps_far_unowned_candidate_unassigned():
     )
 
     assert registry.owner_of_sort_id(900) is None
-    assert registry.slot_for_rid(ST22Q_RID).current_sort.sort_id == 189
+    assert registry.slot_for_rid(TEST_RID_LASER_B).current_sort.sort_id == 189
 
 
 def test_immediate_reacquire_keeps_rid_ui_status_available_in_same_cycle():
-    registry = SpecialRidRegistry(sort_fresh_s=4.0, reacquire_delay_s=0.0)
+    registry = _rid_laser_registry(sort_fresh_s=4.0, reacquire_delay_s=0.0)
     registry.observe_rids(
-        [_rid_at_angles(XDB_RID, 100.0, 10.0, 9.0)], now_ts=9.0
+        [_rid_at_angles(TEST_RID_LASER_A, 100.0, 10.0, 9.0)], now_ts=9.0
     )
     registry.observe_sorts(
         [
@@ -808,9 +842,9 @@ def test_immediate_reacquire_keeps_rid_ui_status_available_in_same_cycle():
 
 
 def test_configured_reacquire_delay_starts_after_sort_freshness_expires():
-    registry = SpecialRidRegistry(sort_fresh_s=4.0, reacquire_delay_s=2.0)
+    registry = _rid_laser_registry(sort_fresh_s=4.0, reacquire_delay_s=2.0)
     registry.observe_rids(
-        [_rid_at_angles(ST22Q_RID, 100.0, 10.0, 9.0)], now_ts=9.0
+        [_rid_at_angles(TEST_RID_LASER_B, 100.0, 10.0, 9.0)], now_ts=9.0
     )
     registry.observe_sorts(
         [
@@ -855,8 +889,8 @@ def test_configured_reacquire_delay_starts_after_sort_freshness_expires():
         now_ts=16.0,
     )
 
-    assert registry.owner_of_sort_id(900).rid_id == ST22Q_RID
-    assert registry.slot_for_rid(ST22Q_RID).current_sort.sort_id == 900
+    assert registry.owner_of_sort_id(900).rid_id == TEST_RID_LASER_B
+    assert registry.slot_for_rid(TEST_RID_LASER_B).current_sort.sort_id == 900
 
 
 def _ready_registry(
@@ -869,9 +903,9 @@ def _ready_registry(
     sort_az=190.0,
     sort_el=30.0,
 ):
-    registry = SpecialRidRegistry(sort_fresh_s=6.0)
+    registry = _rid_laser_registry(sort_fresh_s=6.0)
     rid_ts = now_ts - rid_age
-    rid_item = _rid_at_angles(XDB_RID, rid_az, rid_el, rid_ts)
+    rid_item = _rid_at_angles(TEST_RID_LASER_A, rid_az, rid_el, rid_ts)
     registry.observe_rids([rid_item], now_ts=rid_ts)
     sort_last_ts = now_ts - sort_age
     sort_created_ts = max(rid_ts + 0.001, sort_last_ts - 0.1)
@@ -911,11 +945,64 @@ def test_ui_status_uses_rid_geometry_and_sort_source_only():
     assert status.replaced_target_id == 0
 
 
+def test_visual_ui_id_is_repeated_until_three_successful_ui_sends():
+    registry = _rid_laser_registry(sort_fresh_s=6.0)
+    rid_item = _rid_at_angles(TEST_RID_LASER_A, 170.0, 9.0, 20.0)
+    generation = SortGeneration(700, 20.001)
+    registry.observe_rids([rid_item], now_ts=20.0)
+    registry.observe_sorts(
+        [
+            _sort_observation(
+                700,
+                azimuth=170.0,
+                elevation=9.0,
+                created_ts=20.001,
+                last_detection_ts=20.1,
+                replaced_visual_ui_id=3,
+            )
+        ],
+        _station(),
+        now_ts=20.1,
+    )
+
+    assert registry.replacement_pending_for_generation(generation) is True
+    for _ in range(2):
+        status = registry.ui_statuses(now_ts=20.1, station=_station())[0]
+        assert status.replaced_target_id == 3
+        registry.ack_ui_status_sent(
+            target_id=status.target_id,
+            replaced_target_id=status.replaced_target_id,
+        )
+
+    status = registry.ui_statuses(now_ts=20.1, station=_station())[0]
+    assert status.replaced_target_id == 3
+    registry.ack_ui_status_sent(
+        target_id=status.target_id,
+        replaced_target_id=status.replaced_target_id,
+    )
+    assert registry.ui_statuses(
+        now_ts=20.1, station=_station()
+    )[0].replaced_target_id == 0
+    assert registry.replacement_pending_for_generation(generation) is False
+
+
+def test_special_geometry_uses_rid_height_not_alt_geo_or_station_altitude():
+    expected_elevation = math.degrees(math.atan2(10.0, 100.0))
+    registry, _ = _ready_registry(rid_el=expected_elevation)
+    station = _station()
+    station["altitude"] = -5000.0
+
+    status = registry.ui_statuses(now_ts=20.0, station=station)[0]
+
+    assert status.elevation == pytest.approx(expected_elevation, abs=0.02)
+    assert status.distance == pytest.approx(math.hypot(100.0, 10.0), abs=0.2)
+
+
 def test_special_threat_boundary_matches_existing_ui_rule():
-    assert SpecialRidRegistry._threat_score(99.999) == 100.0
-    assert SpecialRidRegistry._threat_score(100.0) == 50.0
-    assert SpecialRidRegistry._threat_score(300.0) == 50.0
-    assert SpecialRidRegistry._threat_score(300.001) == 0.0
+    assert _SpecialRidRegistry._threat_score(99.999) == 100.0
+    assert _SpecialRidRegistry._threat_score(100.0) == 50.0
+    assert _SpecialRidRegistry._threat_score(300.0) == 50.0
+    assert _SpecialRidRegistry._threat_score(300.001) == 0.0
 
 
 @pytest.mark.parametrize(
@@ -935,7 +1022,7 @@ def test_special_ui_uses_independent_seven_and_six_second_gates(
 
 
 def test_registry_default_sort_freshness_is_six_seconds():
-    assert SpecialRidRegistry().sort_fresh_s == 6.0
+    assert _rid_laser_registry().sort_fresh_s == 6.0
 
 
 class _RecordingSender:
@@ -946,6 +1033,12 @@ class _RecordingSender:
     def send_status(self, **status):
         self.calls.append((self.clock(), status))
         return True
+
+
+class _FailingSender(_RecordingSender):
+    def send_status(self, **status):
+        self.calls.append((self.clock(), status))
+        return False
 
 
 class _OverrunStopEvent:
@@ -996,3 +1089,138 @@ def test_sender_thread_skips_missed_deadlines_instead_of_catch_up_burst():
     )
 
     assert [round(timestamp, 1) for timestamp, _ in sender.calls] == [0.1, 1.1, 1.3]
+
+
+def test_sender_thread_exposes_the_same_ui_status_batch_for_strike_mirroring():
+    registry, rid_item = _ready_registry(now_ts=0.1, rid_az=20.0, rid_el=5.0)
+    scheduler = _OverrunStopEvent()
+    sender = _RecordingSender(scheduler.clock)
+    mirrored_batches = []
+
+    def record_batch(statuses, station, now_ts):
+        mirrored_batches.append((tuple(statuses), dict(station), now_ts))
+
+    run_special_rid_ui_sender(
+        registry=registry,
+        rid_snapshot_provider=lambda: [rid_item],
+        station_snapshot_provider=_station,
+        sender=sender,
+        stop_event=scheduler,
+        status_batch_callback=record_batch,
+        hz=5.0,
+        clock=scheduler.clock,
+        monotonic=scheduler.monotonic,
+    )
+
+    assert len(mirrored_batches) == len(sender.calls) == 3
+    for (_, ui_fields), (statuses, station, now_ts) in zip(
+        sender.calls, mirrored_batches
+    ):
+        assert len(statuses) == 1
+        status = statuses[0]
+        assert status.target_id == ui_fields["target_id"]
+        assert status.azimuth == ui_fields["azimuth"]
+        assert status.elevation == ui_fields["elevation"]
+        assert status.distance == ui_fields["distance"]
+        assert station == _station()
+        assert now_ts in (0.1, 1.1, 1.3)
+
+
+def test_failed_ui_packets_are_not_exposed_for_strike_mirroring():
+    registry, rid_item = _ready_registry(now_ts=0.1, rid_az=20.0, rid_el=5.0)
+    scheduler = _OverrunStopEvent()
+    sender = _FailingSender(scheduler.clock)
+    mirrored_batches = []
+
+    run_special_rid_ui_sender(
+        registry=registry,
+        rid_snapshot_provider=lambda: [rid_item],
+        station_snapshot_provider=_station,
+        sender=sender,
+        stop_event=scheduler,
+        status_batch_callback=lambda statuses, station, now_ts: (
+            mirrored_batches.append(tuple(statuses))
+        ),
+        hz=5.0,
+        clock=scheduler.clock,
+        monotonic=scheduler.monotonic,
+    )
+
+    assert len(sender.calls) == 3
+    assert mirrored_batches == [(), (), ()]
+
+
+def test_three_successful_sender_cycles_consume_visual_delete_notification():
+    registry = _rid_laser_registry(sort_fresh_s=6.0)
+    rid_item = _rid_at_angles(TEST_RID_LASER_A, 20.0, 5.0, 0.1)
+    registry.observe_rids([rid_item], now_ts=0.1)
+    registry.observe_sorts(
+        [
+            _sort_observation(
+                700,
+                azimuth=20.0,
+                elevation=5.0,
+                created_ts=0.101,
+                last_detection_ts=0.1,
+                replaced_visual_ui_id=4,
+            )
+        ],
+        _station(),
+        now_ts=0.1,
+    )
+    scheduler = _OverrunStopEvent()
+    sender = _RecordingSender(scheduler.clock)
+
+    run_special_rid_ui_sender(
+        registry=registry,
+        rid_snapshot_provider=lambda: [rid_item],
+        station_snapshot_provider=_station,
+        sender=sender,
+        stop_event=scheduler,
+        hz=5.0,
+        clock=scheduler.clock,
+        monotonic=scheduler.monotonic,
+    )
+
+    assert [call[1]["replaced_target_id"] for call in sender.calls] == [4, 4, 4]
+    assert registry.ui_statuses(
+        now_ts=1.3, station=_station()
+    )[0].replaced_target_id == 0
+
+
+def test_failed_sender_cycles_do_not_consume_visual_delete_notification():
+    registry = _rid_laser_registry(sort_fresh_s=6.0)
+    rid_item = _rid_at_angles(TEST_RID_LASER_A, 20.0, 5.0, 0.1)
+    registry.observe_rids([rid_item], now_ts=0.1)
+    registry.observe_sorts(
+        [
+            _sort_observation(
+                700,
+                azimuth=20.0,
+                elevation=5.0,
+                created_ts=0.101,
+                last_detection_ts=0.1,
+                replaced_visual_ui_id=5,
+            )
+        ],
+        _station(),
+        now_ts=0.1,
+    )
+    scheduler = _OverrunStopEvent()
+    sender = _FailingSender(scheduler.clock)
+
+    run_special_rid_ui_sender(
+        registry=registry,
+        rid_snapshot_provider=lambda: [rid_item],
+        station_snapshot_provider=_station,
+        sender=sender,
+        stop_event=scheduler,
+        hz=5.0,
+        clock=scheduler.clock,
+        monotonic=scheduler.monotonic,
+    )
+
+    assert [call[1]["replaced_target_id"] for call in sender.calls] == [5, 5, 5]
+    assert registry.ui_statuses(
+        now_ts=1.3, station=_station()
+    )[0].replaced_target_id == 5

@@ -1,4 +1,4 @@
-"""Stable UI identities for the two field-test RID aircraft.
+"""Stable UI identities for the two configured RID_laser aircraft.
 
 This module deliberately stays independent from SORT control and strike
 selection.  SORT contributes only visual continuity and camera provenance;
@@ -7,7 +7,9 @@ all position fields exported for a special RID are derived from RID geometry.
 
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+import hashlib
+import hmac
 import itertools
 import math
 import threading
@@ -16,10 +18,24 @@ from typing import Mapping
 
 
 EARTH_RADIUS_M = 6_371_008.8
-XDB_RID = "1581F6W8W255D0020XDB"
-ST22Q_RID = "1581F986425C800ST22Q"
-SPECIAL_RID_IDS = frozenset((XDB_RID, ST22Q_RID))
+RID_LASER_SHA256_DIGESTS = frozenset({
+    bytes.fromhex(
+        "e22bf88acbc6464a26dfb6c955cb4e984d9bd2844e9bd518582ed46ba2dc19f1"
+    ),
+    bytes.fromhex(
+        "1b52e697bd295126532a327129f9dcf407399eeaad35bbebf822693d6fdd4125"
+    ),
+})
 SPECIAL_RID_UI_IDS = frozenset((1, 2))
+REPLACEABLE_VISUAL_UI_IDS = frozenset((3, 4, 5))
+REPLACEMENT_SUCCESS_COUNT = 3
+
+
+def is_rid_laser(rid_id, digests=None):
+    """Return whether *rid_id* belongs to the configured RID_laser set."""
+    candidate = hashlib.sha256(str(rid_id).encode("utf-8")).digest()
+    allowed = RID_LASER_SHA256_DIGESTS if digests is None else digests
+    return any(hmac.compare_digest(candidate, digest) for digest in allowed)
 
 
 def _finite_float(value):
@@ -66,11 +82,31 @@ def _reported_horizontal_velocity(sample, fallback, max_speed_mps):
     return speed * math.sin(heading_rad), speed * math.cos(heading_rad)
 
 
+def _reported_relative_height(sample, rid_item):
+    """Read RID Height only for the matching latest measurement.
+
+    The compiled RID manager exposes Height on the top-level snapshot but its
+    measurement_history entries do not contain that field.  Do not apply the
+    latest Height retroactively to older history entries.
+    """
+    sample_height = _finite_float(sample.get("height"))
+    if sample_height is not None:
+        return sample_height
+    try:
+        sample_seq = int(sample.get("measurement_seq", 0))
+        latest_seq = int(rid_item.get("measurement_seq", 0))
+    except (TypeError, ValueError, OverflowError):
+        return None
+    if sample_seq != latest_seq:
+        return None
+    return _finite_float(rid_item.get("height"))
+
+
 @dataclass(frozen=True)
 class PredictedRidPoint:
     latitude: float
     longitude: float
-    altitude_m: float | None
+    relative_height_m: float | None
     east_m: float
     north_m: float
     mode: str
@@ -98,6 +134,7 @@ class SortObservation:
     logic_id: int
     last_detection_ts: float
     hit_streak: int
+    replaced_visual_ui_id: int = 0
 
 
 @dataclass(frozen=True)
@@ -124,6 +161,8 @@ class SpecialRidSlot:
     sort_family: set | None = None
     last_visual_detection_ts: float = 0.0
     visual_missing_since: float | None = None
+    replacement_queue: list = field(default_factory=list)
+    replacement_generations: set = field(default_factory=set)
 
     def __post_init__(self):
         if self.sort_family is None:
@@ -151,7 +190,7 @@ class SpecialRidPredictor:
         self.reference_latitude = None
         self.east_m = 0.0
         self.north_m = 0.0
-        self.altitude_m = None
+        self.relative_height_m = None
         self.velocity_east_mps = 0.0
         self.velocity_north_mps = 0.0
         self.velocity_vertical_mps = 0.0
@@ -179,7 +218,7 @@ class SpecialRidPredictor:
         self.measured_east_m = east_m
         self.measured_north_m = north_m
         self.velocity_east_mps, self.velocity_north_mps = reported or (0.0, 0.0)
-        self.altitude_m = _finite_float(sample.get("alt_geo"))
+        self.relative_height_m = _reported_relative_height(sample, rid_item)
         vertical_speed = _finite_float(sample.get("vertical_speed"))
         if vertical_speed is None:
             vertical_speed = _finite_float(rid_item.get("vertical_speed"))
@@ -253,15 +292,19 @@ class SpecialRidPredictor:
             self.velocity_east_mps *= scale
             self.velocity_north_mps *= scale
 
-        altitude_m = _finite_float(sample.get("alt_geo"))
-        if altitude_m is not None:
-            if self.altitude_m is None:
-                self.altitude_m = altitude_m
+        relative_height_m = _reported_relative_height(sample, rid_item)
+        if relative_height_m is not None:
+            if self.relative_height_m is None:
+                self.relative_height_m = relative_height_m
             else:
-                predicted_altitude = self.altitude_m + self.velocity_vertical_mps * gap_s
-                residual_altitude = altitude_m - predicted_altitude
-                self.altitude_m = predicted_altitude + self.alpha * residual_altitude
-                self.velocity_vertical_mps += self.beta * residual_altitude / gap_s
+                predicted_height = (
+                    self.relative_height_m + self.velocity_vertical_mps * gap_s
+                )
+                residual_height = relative_height_m - predicted_height
+                self.relative_height_m = (
+                    predicted_height + self.alpha * residual_height
+                )
+                self.velocity_vertical_mps += self.beta * residual_height / gap_s
         reported_vertical = _finite_float(sample.get("vertical_speed"))
         if reported_vertical is None:
             reported_vertical = _finite_float(rid_item.get("vertical_speed"))
@@ -314,10 +357,11 @@ class SpecialRidPredictor:
         prediction_age_s = min(measurement_age_s, self.max_prediction_s)
         east_m = self.east_m + self.velocity_east_mps * prediction_age_s
         north_m = self.north_m + self.velocity_north_mps * prediction_age_s
-        altitude_m = (
+        relative_height_m = (
             None
-            if self.altitude_m is None
-            else self.altitude_m + self.velocity_vertical_mps * prediction_age_s
+            if self.relative_height_m is None
+            else self.relative_height_m
+            + self.velocity_vertical_mps * prediction_age_s
         )
         latitude, longitude = _unproject_geodetic(
             east_m, north_m, self.reference_latitude
@@ -331,7 +375,7 @@ class SpecialRidPredictor:
         return PredictedRidPoint(
             latitude=latitude,
             longitude=longitude,
-            altitude_m=altitude_m,
+            relative_height_m=relative_height_m,
             east_m=east_m,
             north_m=north_m,
             mode=mode,
@@ -357,12 +401,10 @@ def _geometry_from_point(point, station):
         return None
     station_lat = _finite_float(station.get("latitude"))
     station_lon = _finite_float(station.get("longitude"))
-    station_alt = _finite_float(station.get("altitude"))
     if (
         station_lat is None
         or station_lon is None
-        or station_alt is None
-        or point.altitude_m is None
+        or point.relative_height_m is None
     ):
         return None
     lat1 = math.radians(station_lat)
@@ -382,7 +424,10 @@ def _geometry_from_point(point, station):
         - math.sin(lat1) * math.cos(lat2) * math.cos(delta_lon)
     )
     azimuth = math.degrees(math.atan2(bearing_y, bearing_x)) % 360.0
-    vertical_m = float(point.altitude_m) - station_alt
+    # For the two special RID aircraft, the broadcast Height is already the
+    # vertical difference used by UI and strike geometry.  Station altitude
+    # and RID AltGeo are deliberately excluded from this path.
+    vertical_m = float(point.relative_height_m)
     elevation = math.degrees(math.atan2(vertical_m, horizontal_m))
     distance = math.hypot(horizontal_m, vertical_m)
     if not all(math.isfinite(value) for value in (azimuth, elevation, distance)):
@@ -400,7 +445,11 @@ def should_send_sort_through_ordinary_ui(track, owned_generations):
     return sort_generation_from_track(track) not in set(owned_generations or ())
 
 
-def sort_observation_from_track(track, map_azimuth):
+def sort_observation_from_track(
+    track,
+    map_azimuth,
+    replaced_visual_ui_id=0,
+):
     """Copy only stable SORT state needed by the special identity layer."""
 
     board = getattr(track, "last_source_board", None)
@@ -427,11 +476,12 @@ def sort_observation_from_track(track, map_azimuth):
         logic_id=logic_id,
         last_detection_ts=float(getattr(track, "last_update_ts", 0.0)),
         hit_streak=int(getattr(track, "hit_streak", 0)),
+        replaced_visual_ui_id=int(replaced_visual_ui_id or 0),
     )
 
 
 class SpecialRidRegistry:
-    """Own process-lifetime UI slots and SORT generations for special RIDs."""
+    """Own process-lifetime UI slots and SORT generations for RID_laser."""
 
     def __init__(
         self,
@@ -442,6 +492,7 @@ class SpecialRidRegistry:
         sort_fresh_s=6.0,
         sort_internal_s=12.0,
         reacquire_delay_s=0.0,
+        rid_laser_digests=None,
     ):
         self.predictor_factory = predictor_factory
         self.log_callback = log_callback
@@ -449,6 +500,11 @@ class SpecialRidRegistry:
         self.sort_fresh_s = max(0.1, float(sort_fresh_s))
         self.sort_internal_s = max(self.sort_fresh_s, float(sort_internal_s))
         self.reacquire_delay_s = max(0.0, float(reacquire_delay_s))
+        self.rid_laser_digests = (
+            RID_LASER_SHA256_DIGESTS
+            if rid_laser_digests is None
+            else frozenset(bytes(digest) for digest in rid_laser_digests)
+        )
         self._lock = threading.RLock()
         self._slots = {}
         self._owners = {}
@@ -471,7 +527,7 @@ class SpecialRidRegistry:
         with self._lock:
             for item in rid_items or ():
                 rid_id = str(item.get("rid_id", ""))
-                if rid_id not in SPECIAL_RID_IDS:
+                if not is_rid_laser(rid_id, self.rid_laser_digests):
                     continue
                 slot = self._slots.get(rid_id)
                 if slot is None:
@@ -595,7 +651,38 @@ class SpecialRidRegistry:
                 angle_cost=angle_cost,
                 skip_reason=reason,
             )
+        self._queue_visual_replacement(slot, observation, now_ts)
         return True
+
+    def _queue_visual_replacement(self, slot, observation, now_ts):
+        try:
+            old_ui_id = int(observation.replaced_visual_ui_id)
+        except (TypeError, ValueError, OverflowError):
+            return
+        generation = observation.generation
+        if (
+            old_ui_id not in REPLACEABLE_VISUAL_UI_IDS
+            or old_ui_id == slot.ui_id
+            or generation in slot.replacement_generations
+        ):
+            return
+        slot.replacement_generations.add(generation)
+        slot.replacement_queue.append(
+            {
+                "generation": generation,
+                "old_ui_id": old_ui_id,
+                "remaining": REPLACEMENT_SUCCESS_COUNT,
+            }
+        )
+        self._log(
+            "VISUAL_UI_REPLACEMENT_QUEUED",
+            timestamp=now_ts,
+            rid_id=slot.rid_id,
+            ui_id=slot.ui_id,
+            current_sort_id=generation.sort_id,
+            candidate_sort_id=old_ui_id,
+            skip_reason=f"successes_required={REPLACEMENT_SUCCESS_COUNT}",
+        )
 
     def _camera_relation(self, left, right):
         if int(left.logic_id) == int(right.logic_id):
@@ -1032,6 +1119,52 @@ class SpecialRidRegistry:
             generation = max(generations, key=lambda item: item.created_ts)
             return self._slots.get(self._owners[generation])
 
+    def replacement_pending_for_generation(self, generation):
+        with self._lock:
+            rid_id = self._owners.get(generation)
+            slot = None if rid_id is None else self._slots.get(rid_id)
+            if slot is None:
+                return False
+            return any(
+                task["generation"] == generation
+                for task in slot.replacement_queue
+            )
+
+    def ack_ui_status_sent(self, target_id, replaced_target_id):
+        try:
+            target_id = int(target_id)
+            replaced_target_id = int(replaced_target_id)
+        except (TypeError, ValueError, OverflowError):
+            return False
+        if replaced_target_id not in REPLACEABLE_VISUAL_UI_IDS:
+            return False
+        with self._lock:
+            slot = next(
+                (
+                    item
+                    for item in self._slots.values()
+                    if item.ui_id == target_id
+                ),
+                None,
+            )
+            if slot is None or not slot.replacement_queue:
+                return False
+            task = slot.replacement_queue[0]
+            if task["old_ui_id"] != replaced_target_id:
+                return False
+            task["remaining"] -= 1
+            if task["remaining"] <= 0:
+                completed = slot.replacement_queue.pop(0)
+                self._log(
+                    "VISUAL_UI_REPLACEMENT_ACKED",
+                    timestamp=time.time(),
+                    rid_id=slot.rid_id,
+                    ui_id=slot.ui_id,
+                    current_sort_id=completed["generation"].sort_id,
+                    candidate_sort_id=completed["old_ui_id"],
+                )
+            return True
+
     @staticmethod
     def _threat_score(distance):
         if distance < 100.0:
@@ -1118,6 +1251,11 @@ class SpecialRidRegistry:
                     continue
                 azimuth, elevation, distance = geometry
                 threat_score = self._threat_score(distance)
+                replaced_target_id = (
+                    int(slot.replacement_queue[0]["old_ui_id"])
+                    if slot.replacement_queue
+                    else 0
+                )
                 self._log(
                     "RID_PREDICT",
                     timestamp=now_ts,
@@ -1147,7 +1285,7 @@ class SpecialRidRegistry:
                         elevation=elevation,
                         distance=distance,
                         threat_score=threat_score,
-                        replaced_target_id=0,
+                        replaced_target_id=replaced_target_id,
                     )
                 )
             return statuses
@@ -1160,6 +1298,7 @@ def run_special_rid_ui_sender(
     sender,
     stop_event,
     log_callback=None,
+    status_batch_callback=None,
     hz=5.0,
     clock=time.time,
     monotonic=time.monotonic,
@@ -1174,6 +1313,7 @@ def run_special_rid_ui_sender(
             registry.observe_rids(rid_snapshot_provider() or (), now_ts=now_ts)
             station = station_snapshot_provider() or {}
             statuses = registry.ui_statuses(now_ts=now_ts, station=station)
+            sent_statuses = []
             for status in statuses:
                 sent = sender.send_status(
                     board_str=status.board,
@@ -1183,8 +1323,14 @@ def run_special_rid_ui_sender(
                     elevation=status.elevation,
                     distance=status.distance,
                     threat_score=status.threat_score,
-                    replaced_target_id=0,
+                    replaced_target_id=status.replaced_target_id,
                 )
+                if sent:
+                    sent_statuses.append(status)
+                    registry.ack_ui_status_sent(
+                        target_id=status.target_id,
+                        replaced_target_id=status.replaced_target_id,
+                    )
                 if log_callback is not None:
                     try:
                         log_callback({
@@ -1202,7 +1348,26 @@ def run_special_rid_ui_sender(
                         })
                     except Exception:
                         pass
+            if status_batch_callback is not None:
+                try:
+                    status_batch_callback(tuple(sent_statuses), station, now_ts)
+                except Exception as exc:
+                    if log_callback is not None:
+                        try:
+                            log_callback({
+                                "timestamp": now_ts,
+                                "event": "STRIKE_SEND_SKIP",
+                                "send_result": 0,
+                                "skip_reason": f"strike_mirror_error:{exc}",
+                            })
+                        except Exception:
+                            pass
         except Exception as exc:
+            if status_batch_callback is not None:
+                try:
+                    status_batch_callback((), {}, now_ts)
+                except Exception:
+                    pass
             if log_callback is not None:
                 try:
                     log_callback({

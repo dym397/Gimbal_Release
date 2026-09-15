@@ -13,12 +13,12 @@
 - 坐标只能来自板端GPS线程维护的站点 `SharedPositionState`，不是目标RID坐标。要求站点位置有效、经纬度有限且范围合法，明确拒绝 `default/configured_default` 预设来源；否则清空周期打击快照并停止发送，禁止填0。
 - UI `0x02`/`0x03`、目标ID、距离/角度编码、云台控制和打击安全门控均未改变。打击时序日志与通用事件日志增加经纬度诊断字段。
 
-## 2026-09-13 两个特殊RID固定UI身份与SORT轨迹族
-- 仅 `1581F6W8W255D0020XDB`、`1581F986425C800ST22Q` 启用 `core/special_rid_identity.py`。以“RID存在且首次绑定一个现有 `ui_confirmed=True` SORT”为注册时刻，先成功者动态获得UI_ID 1，后成功者获得2；UI_ID、SORT generation所有权和轨迹族保持到进程退出。
+## 2026-09-13 两个RID_laser固定UI身份与SORT轨迹族
+- 仅源码中以SHA-256摘要配置的两个 `RID_laser` 目标启用 `core/special_rid_identity.py`。以“RID存在且首次绑定一个现有 `ui_confirmed=True` SORT”为注册时刻，先成功者动态获得UI_ID 1，后成功者获得2；UI_ID、SORT generation所有权和轨迹族保持到进程退出。源码、测试和文档不得保存两个真实RID序列的明文。
 - 特殊RID的UI `0x02` 仍为34字节 `!BB8sIffffI`，`replaced_target_id=0`。目标ID来自特殊RID槽位；方位、俯仰、距离和威胁来自RID实时预测；SORT只提供视觉有效性、`board` 和 `camera_id`。
 - 特殊RID独立5Hz发送：RID最后真实测量后0~5秒实时外推，5~7秒冻结5秒位置，RID接收年龄超过7秒停止；current SORT检测年龄超过6秒也停止。预测点不写回真实测量历史。
 - SORT接续复用既有 `ui_confirmed`，不新增第三层计数。同摄像头6°、相邻摄像头9°、12秒内双轨收敛1.5°；候选generation必须晚于RID出现和至少一个族内前代，禁止吸收RID出现前的旧SORT。current SORT在6秒内新鲜时保持粘性；超过6秒后不再等待旧45秒门限，也不再参考可能误绑的旧SORT几何，而是在同一周期从新鲜、确认、未归属SORT中按当前RID方位/俯仰二维角度执行全局一对一最近重绑定。附加延迟由 `SPECIAL_RID_REACQUIRE_DELAY_SECONDS` 配置，默认 `0s`。
-- 已归属特殊RID的SORT generation永久从普通UI发送路径排除；特殊ID固定占用1/2，普通UI分配器在特殊注册表启用时从3开始，避免全局目标ID冲突。普通测距runtime和云台主目标控制保持不变；打击候选与发送现在只允许特定RID已归属generation和ID 1/2。`logs/20260912_032537` 从 `1789156230.355754` 回放得到：XDB/UI1族 `{177}`，ST22Q/UI2族 `{189,196,202,205,238}`，最终SORT238仍归ST22Q且未被XDB抢占。
+- 已归属RID_laser的SORT generation永久从普通UI发送路径排除；RID_laser ID固定占用1/2，普通UI分配器在专用注册表启用时从3开始，避免全局目标ID冲突。普通测距runtime和云台主目标控制保持不变；打击候选与发送现在只允许RID_laser已归属generation和ID 1/2。`logs/20260912_032537` 从 `1789156230.355754` 回放得到：RID_laser目标1/UI1族 `{177}`，目标2/UI2族 `{189,196,202,205,238}`，最终SORT238仍归目标2且未被目标1抢占。
 
 ## 2026-09-10 RID切换UI目标时的旧轨迹删除通知
 - UI `0x02` 状态包固定为网络字节序 `!BB8sIffffI`、共34字节；末尾 `replaced_target_id` 为4字节无符号整数，`0`表示无旧目标需要删除，非0表示UI应按全局 `target_id` 立即删除旧轨迹。本协议不兼容旧版30字节UI包，追踪端和UI端必须同步升级。

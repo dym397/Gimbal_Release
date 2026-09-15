@@ -4,6 +4,8 @@ import sys
 from pathlib import Path
 from types import SimpleNamespace
 
+import pytest
+
 
 CORE_DIR = Path(__file__).resolve().parents[1] / "core"
 sys.path.insert(0, str(CORE_DIR))
@@ -60,9 +62,73 @@ def test_unowned_sort_keeps_existing_ordinary_ui_path():
     assert should_send_sort_through_ordinary_ui(_Track(), set()) is True
 
 
+def test_rid_owned_sort_is_excluded_from_visual_ranging_candidates():
+    owned = _Track(sort_id=238, created_ts=100.5)
+    ordinary = _Track(sort_id=239, created_ts=100.6)
+
+    selected = tracking.select_ordinary_ui_tracks_for_output(
+        [owned, ordinary],
+        owned_special_generations={SortGeneration(238, 100.5)},
+        special_rid_ui_exclusive=False,
+    )
+
+    assert selected == [ordinary]
+
+
 def test_ordinary_ui_allocator_skips_reserved_special_ids():
     assert tracking.next_unreserved_ui_id(1, frozenset((1, 2))) == 3
     assert tracking.next_unreserved_ui_id(3, frozenset((1, 2))) == 3
+
+
+def test_ordinary_visual_ui_ids_cycle_between_three_and_five():
+    allocator = tracking.CyclicUiIdAllocator((3, 4, 5))
+
+    assert allocator.get_or_assign(101) == 3
+    assert allocator.get_or_assign(102) == 4
+    assert allocator.get_or_assign(103) == 5
+    assert allocator.get_or_assign(104) is None
+
+    allocator.release_inactive((102, 103))
+    assert allocator.get_or_assign(104) == 3
+    assert allocator.get_or_assign(105) is None
+
+    allocator.release(102)
+    assert allocator.get_or_assign(105) == 4
+
+
+def test_ordinary_visual_ui_id_stays_stable_while_track_is_active():
+    allocator = tracking.CyclicUiIdAllocator((3, 4, 5))
+
+    assert allocator.get_or_assign(101) == 3
+    assert allocator.get_or_assign(101) == 3
+
+
+def test_rid_takeover_keeps_old_visual_id_reserved_until_delete_is_acked():
+    allocator = tracking.CyclicUiIdAllocator((3, 4, 5))
+    tracks = [_Track(sort_id=101), _Track(sort_id=102), _Track(sort_id=103)]
+    for track, expected in zip(tracks, (3, 4, 5)):
+        assert allocator.get_or_assign(track.id) == expected
+
+    class _Registry:
+        pending = True
+
+        def owner_of(self, generation):
+            return object() if generation.sort_id == 101 else None
+
+        def replacement_pending_for_generation(self, generation):
+            return self.pending and generation.sort_id == 101
+
+    registry = _Registry()
+    tracking.release_completed_special_ui_assignments(
+        allocator, tracks, registry
+    )
+    assert allocator.get_or_assign(104) is None
+
+    registry.pending = False
+    tracking.release_completed_special_ui_assignments(
+        allocator, tracks, registry
+    )
+    assert allocator.get_or_assign(104) == 3
 
 
 def test_special_rid_exclusive_mode_blocks_all_ordinary_ui_tracks():
@@ -147,6 +213,16 @@ def test_track_conversion_preserves_exact_generation_and_camera_source():
     )
 
 
+def test_track_conversion_carries_previously_sent_visual_ui_id():
+    observation = sort_observation_from_track(
+        _Track(),
+        map_azimuth=lambda relative: relative,
+        replaced_visual_ui_id=5,
+    )
+
+    assert observation.replaced_visual_ui_id == 5
+
+
 class _Socket:
     def __init__(self):
         self.packet = None
@@ -170,11 +246,11 @@ def test_special_status_uses_existing_34_byte_ui_packet_contract():
         elevation=9.0,
         distance=155.0,
         threat_score=50.0,
-        replaced_target_id=0,
+        replaced_target_id=3,
     )
 
     assert len(fake_socket.packet) == 34
-    assert struct.unpack("!BB8sIffffI", fake_socket.packet)[8] == 0
+    assert struct.unpack("!BB8sIffffI", fake_socket.packet)[8] == 3
 
 
 def test_field_logger_writes_dedicated_special_identity_csv(tmp_path):
@@ -193,3 +269,37 @@ def test_field_logger_writes_dedicated_special_identity_csv(tmp_path):
         rows = list(csv.DictReader(stream))
     assert rows[0]["event"] == "REGISTERED"
     assert rows[0]["ui_id"] == "1"
+
+
+def test_gps_sender_stores_station_altitude_in_rid_ellipsoid_reference(
+    monkeypatch,
+):
+    class _StopAfterFirstCycle(Exception):
+        pass
+
+    class _PositionState:
+        altitude = None
+
+        def update(self, *, longitude, latitude, altitude, source):
+            self.altitude = altitude
+
+    class _Sender:
+        def send_gps_location(self, *, latitude, longitude):
+            return True
+
+    def fake_read_gps_fix(*, altitude_reference, **_kwargs):
+        altitude = 831.3138 if altitude_reference == "ellipsoid" else 862.002
+        return 107.10433499, 27.95072567, altitude, "test-gps"
+
+    def stop_after_first_cycle(_seconds):
+        raise _StopAfterFirstCycle
+
+    position_state = _PositionState()
+    monkeypatch.setattr(tracking, "read_gps_fix", fake_read_gps_fix)
+    monkeypatch.setattr(tracking, "field_log_event", lambda _event: None)
+    monkeypatch.setattr(tracking.time, "sleep", stop_after_first_cycle)
+
+    with pytest.raises(_StopAfterFirstCycle):
+        tracking.gps_sender_thread(_Sender(), position_state)
+
+    assert position_state.altitude == pytest.approx(831.3138)

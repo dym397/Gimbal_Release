@@ -290,6 +290,7 @@ LINUX_GIMBAL_CAMERA_SOURCE = "/dev/v4l/by-path/platform-xhci-hcd.4.auto-usb-0:1.
 ENABLE_STRIKE_SEND = _env_flag("ENABLE_STRIKE_SEND", True)
 STRIKE_IP = os.getenv("STRIKE_IP", "192.168.0.80")
 STRIKE_PORT = int(os.getenv("STRIKE_PORT", "10123"))
+STRIKE_SOURCE_PORT = _env_int("STRIKE_SOURCE_PORT", 0)
 STRIKE_SEND_HZ = _env_float("STRIKE_SEND_HZ", 10.0)
 STRIKE_WINDOW_SECONDS = _env_float("STRIKE_WINDOW_SECONDS", 1.0)
 STRIKE_LEAD_TIME = _env_float("STRIKE_LEAD_TIME", 0.3)
@@ -350,7 +351,8 @@ RID_UI_MAX_SPEED_MPS = _env_float("RID_UI_MAX_SPEED_MPS", 40.0)
 SPECIAL_RID_IDENTITY_ENABLED = _env_flag(
     "SPECIAL_RID_IDENTITY_ENABLED", True
 )
-SPECIAL_RID_UI_EXCLUSIVE = _env_flag("SPECIAL_RID_UI_EXCLUSIVE", True)
+SPECIAL_RID_UI_EXCLUSIVE = _env_flag("SPECIAL_RID_UI_EXCLUSIVE", False)
+ORDINARY_VISION_UI_IDS = (3, 4, 5)
 SPECIAL_RID_UI_RATE_HZ = _env_float("SPECIAL_RID_UI_RATE_HZ", 5.0)
 SPECIAL_RID_MAX_PREDICTION_SECONDS = _env_float(
     "SPECIAL_RID_MAX_PREDICTION_SECONDS", 5.0
@@ -1415,14 +1417,25 @@ class StrikeSender:
     FRAME_HEAD = b"\xAA\x55"
     FRAME_TAIL = b"\x55\xAA"
     FRAME_LENGTH = 0x15
-    MIN_ELEVATION_DEG = -35.0
-    MAX_ELEVATION_DEG = 60.0
+    MIN_ELEVATION_DEG = -90.0
+    MAX_ELEVATION_DEG = 90.0
 
-    def __init__(self, ip, port):
+    def __init__(self, ip, port, source_port=0):
         self.ip = ip
         self.port = port
+        self.source_port = int(source_port)
+        if not 0 <= self.source_port <= 0xFFFF:
+            raise ValueError(
+                f"strike source port out of uint16 range: {self.source_port}"
+            )
         self.sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        self.sock.settimeout(0.2)
+        try:
+            if self.source_port:
+                self.sock.bind(("0.0.0.0", self.source_port))
+            self.sock.settimeout(0.2)
+        except Exception:
+            self.sock.close()
+            raise
         self.lock = threading.Lock()
 
     @staticmethod
@@ -1607,66 +1620,84 @@ class PeriodicStrikeSender:
         self.on_send = on_send
         self.on_error = on_error
         self.lock = threading.Lock()
-        self.snapshot = None
+        self.snapshots = {}
         self.stop_event = threading.Event()
         self.thread = None
 
     def publish(self, snapshot):
+        item = dict(snapshot)
+        target_id = int(item["target_id"])
         with self.lock:
-            self.snapshot = dict(snapshot)
+            self.snapshots[target_id] = item
+
+    def replace(self, snapshots):
+        replacement = {}
+        for snapshot in snapshots:
+            item = dict(snapshot)
+            replacement[int(item["target_id"])] = item
+        with self.lock:
+            self.snapshots = replacement
 
     def clear(self):
         with self.lock:
-            self.snapshot = None
+            self.snapshots.clear()
 
     def send_once(self, now=None):
         now = time.time() if now is None else float(now)
-        snapshot = None
-        try:
-            with self.lock:
-                if self.snapshot is None:
-                    return False
-                snapshot = dict(self.snapshot)
-                if now >= float(snapshot["valid_until"]):
-                    return False
+        with self.lock:
+            snapshots = [
+                dict(snapshot)
+                for _, snapshot in sorted(self.snapshots.items())
+                if now < float(snapshot["valid_until"])
+            ]
+            self.snapshots = {
+                target_id: snapshot
+                for target_id, snapshot in self.snapshots.items()
+                if now < float(snapshot["valid_until"])
+            }
+        sent_any = False
+        for snapshot in snapshots:
+            try:
                 target_id = int(snapshot["target_id"])
                 if target_id not in SPECIAL_RID_UI_IDS:
                     raise ValueError(
                         f"strike target_id is not special RID ID 1/2: {target_id}"
                     )
                 snapshot["target_id"] = target_id
-                with self.hardware_state.lock:
-                    if not (
-                        self.hardware_state.is_settled
-                        and self.hardware_state.is_stationary
-                        and int(self.hardware_state.settled_track_id)
-                        == int(snapshot["internal_track_id"])
-                    ):
-                        return False
-                    snapshot["settled_cmd_id"] = int(
-                        self.hardware_state.settled_cmd_id
-                    )
-                    packet, sendto_ts = self.sender.send_target_with_timestamp(
-                        target_id=snapshot["target_id"],
-                        distance_m=snapshot["distance_m"],
-                        azimuth_deg=snapshot["azimuth_deg"],
-                        elevation_deg=snapshot["elevation_deg"],
-                        longitude_deg=snapshot["longitude_deg"],
-                        latitude_deg=snapshot["latitude_deg"],
-                    )
-        except Exception as exc:
-            if self.on_error is not None:
+                if self.hardware_state is not None:
+                    with self.hardware_state.lock:
+                        if not (
+                            self.hardware_state.is_settled
+                            and self.hardware_state.is_stationary
+                            and int(self.hardware_state.settled_track_id)
+                            == int(snapshot["internal_track_id"])
+                        ):
+                            continue
+                        snapshot["settled_cmd_id"] = int(
+                            self.hardware_state.settled_cmd_id
+                        )
+                packet, sendto_ts = self.sender.send_target_with_timestamp(
+                    target_id=snapshot["target_id"],
+                    distance_m=snapshot["distance_m"],
+                    azimuth_deg=snapshot["azimuth_deg"],
+                    elevation_deg=snapshot["elevation_deg"],
+                    longitude_deg=snapshot["longitude_deg"],
+                    latitude_deg=snapshot["latitude_deg"],
+                )
+            except Exception as exc:
+                if self.on_error is not None:
+                    try:
+                        self.on_error(snapshot, exc, time.time())
+                    except Exception:
+                        pass
+                continue
+            if self.on_send is not None:
                 try:
-                    self.on_error(snapshot or {}, exc, time.time())
+                    self.on_send(snapshot, packet, sendto_ts)
                 except Exception:
                     pass
-            return False
-        if self.on_send is not None:
-            try:
-                self.on_send(snapshot, packet, sendto_ts)
-            except Exception:
-                pass
-        return True
+            sent_any = True
+        return sent_any
 
     def _run(self):
         next_send = time.monotonic() + self.interval
@@ -1953,7 +1984,7 @@ def gps_sender_thread(sender, position_state=None):
             status_interval=GPS_STATUS_INTERVAL,
             coordinate_system="wgs84",
             include_altitude=True,
-            altitude_reference="msl",
+            altitude_reference="ellipsoid",
         )
 
         send_source = source
@@ -1992,12 +2023,12 @@ def gps_sender_thread(sender, position_state=None):
                 "event": "GPS_STATION_FIX",
                 "reason": (
                     f"source={send_source},lat={latitude:.8f},"
-                    f"lon={longitude:.8f},alt_msl_m={altitude}"
+                    f"lon={longitude:.8f},alt_ellipsoid_m={altitude}"
                 ),
             })
 
         # Keep the historical UI coordinate behavior while RID calculations
-        # use the unrounded WGS-84 fix and GGA MSL height stored above.
+        # use the unrounded WGS-84 fix and ellipsoid height stored above.
         ui_longitude = longitude
         ui_latitude = latitude
         if send_source != "default" and wgs84_to_gcj02 is not None:
@@ -2420,6 +2451,60 @@ def next_unreserved_ui_id(candidate, reserved_ids):
     while ui_id in reserved:
         ui_id += 1
     return ui_id
+
+
+class CyclicUiIdAllocator:
+    """Keep live ordinary SORT tracks unique within a fixed cyclic UI ID pool."""
+
+    def __init__(self, allowed_ids):
+        self.allowed_ids = tuple(dict.fromkeys(int(item) for item in allowed_ids))
+        if not self.allowed_ids or any(item <= 0 for item in self.allowed_ids):
+            raise ValueError("allowed UI IDs must be unique positive integers")
+        self._next_index = 0
+        self._track_to_ui_id = {}
+
+    def release(self, track_id):
+        self._track_to_ui_id.pop(int(track_id), None)
+
+    def release_inactive(self, active_track_ids):
+        active_ids = {int(item) for item in active_track_ids}
+        for track_id in tuple(self._track_to_ui_id):
+            if track_id not in active_ids:
+                del self._track_to_ui_id[track_id]
+
+    def get_or_assign(self, track_id):
+        track_id = int(track_id)
+        assigned = self._track_to_ui_id.get(track_id)
+        if assigned is not None:
+            return assigned
+
+        used_ids = set(self._track_to_ui_id.values())
+        for offset in range(len(self.allowed_ids)):
+            index = (self._next_index + offset) % len(self.allowed_ids)
+            candidate = self.allowed_ids[index]
+            if candidate in used_ids:
+                continue
+            self._track_to_ui_id[track_id] = candidate
+            self._next_index = (index + 1) % len(self.allowed_ids)
+            return candidate
+        return None
+
+
+def release_completed_special_ui_assignments(
+    allocator,
+    active_tracks,
+    special_rid_registry,
+):
+    """Release an old visual ID only after its UI delete notice is complete."""
+    if special_rid_registry is None:
+        return
+    for track in active_tracks:
+        generation = sort_generation_from_track(track)
+        if special_rid_registry.owner_of(generation) is None:
+            continue
+        if special_rid_registry.replacement_pending_for_generation(generation):
+            continue
+        allocator.release(track.id)
 
 
 def get_turn_direction_label(delta_az, delta_el, deadband_az=0.35, deadband_el=0.25):
@@ -3836,8 +3921,48 @@ def main():
         UI_PORT,
         on_status_send=field_log_target_detect,
     )
-    strike_sender = StrikeSender(STRIKE_IP, STRIKE_PORT) if ENABLE_STRIKE_SEND else None
+    strike_sender = (
+        StrikeSender(
+            STRIKE_IP,
+            STRIKE_PORT,
+            source_port=STRIKE_SOURCE_PORT,
+        )
+        if ENABLE_STRIKE_SEND
+        else None
+    )
+    # The legacy gimbal-gated strike path stays disabled. Strike output now
+    # mirrors the successfully sent special-RID UI status batch.
     strike_send_worker = None
+    special_strike_send_worker = None
+
+    if strike_sender is not None:
+        def log_special_strike_send(snapshot, packet, send_ts):
+            if FIELD_LOGGER is not None:
+                FIELD_LOGGER.write_strike_timing(snapshot, packet, send_ts)
+            row = dict(snapshot["log_row"])
+            row["timestamp"] = f"{send_ts:.6f}"
+            row["reason"] = (
+                f"source=special_rid_ui_mirror,packet={packet.hex(' ')}"
+            )
+            field_log_event(row)
+
+        def log_special_strike_send_error(snapshot, exc, send_ts):
+            if PRINT_EVENT_LOGS:
+                print(f"[Strike][Warn] direct RID mirror skipped: {exc}")
+            row = dict(snapshot.get("error_log_row", {}))
+            row["timestamp"] = f"{send_ts:.6f}"
+            row["event"] = "STRIKE_SEND_SKIP"
+            row["reason"] = str(exc)
+            field_log_event(row)
+
+        special_strike_send_worker = PeriodicStrikeSender(
+            strike_sender,
+            send_hz=STRIKE_SEND_HZ,
+            hardware_state=None,
+            on_send=log_special_strike_send,
+            on_error=log_special_strike_send_error,
+        )
+        special_strike_send_worker.start()
     station_position = SharedPositionState(
         longitude=(
             DEFAULT_LONGITUDE if RID_ALLOW_DEFAULT_STATION_POSITION else None
@@ -3911,8 +4036,9 @@ def main():
     if ENABLE_STRIKE_SEND:
         print(
             f"[Strike] Enabled target UDP sender: {STRIKE_IP}:{STRIKE_PORT}, "
-            f"hz={STRIKE_SEND_HZ:.1f}, window={STRIKE_WINDOW_SECONDS:.2f}s, "
-            f"lead={STRIKE_LEAD_TIME:.2f}s, settled_ttl={STRIKE_SETTLED_EVENT_TTL:.2f}s"
+            f"source_port={STRIKE_SOURCE_PORT or 'dynamic'}, "
+            f"hz={STRIKE_SEND_HZ:.1f}, source=special_rid_ui_mirror, "
+            "gimbal_gate=disabled, legacy_strike_path=disabled"
         )
     if not USE_MOCK_GIMBAL:
         _validate_serial_port("GIMBAL_PORT", GIMBAL_PORT)
@@ -4034,6 +4160,48 @@ def main():
         )
         special_rid_stop_event = threading.Event()
 
+        def publish_special_strike_statuses(statuses, station, now_ts):
+            if special_strike_send_worker is None:
+                return
+            coordinates = strike_station_coordinates(station)
+            snapshots = []
+            if coordinates is not None:
+                longitude, latitude = coordinates
+                valid_until = float(now_ts) + max(
+                    0.5,
+                    2.0 / max(SPECIAL_RID_UI_RATE_HZ, 0.1),
+                )
+                for status in statuses:
+                    target_id = int(status.target_id)
+                    if target_id not in SPECIAL_RID_UI_IDS:
+                        continue
+                    snapshots.append({
+                        "target_id": target_id,
+                        "distance_m": float(status.distance),
+                        "azimuth_deg": float(status.azimuth),
+                        "elevation_deg": float(status.elevation),
+                        "longitude_deg": float(longitude),
+                        "latitude_deg": float(latitude),
+                        "valid_until": valid_until,
+                        "log_row": {
+                            "event": "STRIKE_SEND",
+                            "track_id": "",
+                            "master_id": "",
+                            "internal_track_id": "",
+                            "ui_id": target_id,
+                            "distance": f"{float(status.distance):.6f}",
+                            "distance_source": "special_rid_ui_mirror",
+                            "longitude": f"{float(longitude):.8f}",
+                            "latitude": f"{float(latitude):.8f}",
+                        },
+                        "error_log_row": {
+                            "ui_id": target_id,
+                            "distance": f"{float(status.distance):.6f}",
+                            "distance_source": "special_rid_ui_mirror",
+                        },
+                    })
+            special_strike_send_worker.replace(snapshots)
+
         def special_rid_snapshot_provider():
             manager = getattr(measurement_runtime, "_rid_track_manager", None)
             if manager is None:
@@ -4055,6 +4223,7 @@ def main():
                 "sender": sender,
                 "stop_event": special_rid_stop_event,
                 "log_callback": field_log_special_rid_identity,
+                "status_batch_callback": publish_special_strike_statuses,
                 "hz": SPECIAL_RID_UI_RATE_HZ,
             },
             name="special-rid-ui-sender",
@@ -4071,12 +4240,13 @@ def main():
             "runtime dependency is unavailable"
         )
 
-    distance_mode = (
+    ui_distance_mode = (
         "RID/visual runtime" if measurement_runtime is not None else "none"
     )
     print(
-        f"[Init] UI/Strike distance source: {distance_mode} "
-        f"(ttl={TRACK_DISTANCE_TTL:.1f}s)"
+        f"[Init] UI ranging runtime: {ui_distance_mode} "
+        f"(ttl={TRACK_DISTANCE_TTL:.1f}s); "
+        "strike source=special_rid_ui_mirror"
     )
     print("=== System V9.0 (Predictive Tracking & Scheduling) Running ===")
 
@@ -4122,13 +4292,8 @@ def main():
     recv_unique_boxes = set()  # {(x1,y1,x2,y2), ...}
     ui_send_total = 0
     ui_send_counter = Counter()  # {ui_id: send_count}
-    reserved_special_ui_ids = (
-        SPECIAL_RID_UI_IDS
-        if special_rid_registry is not None
-        else frozenset()
-    )
-    next_ui_id = next_unreserved_ui_id(1, reserved_special_ui_ids)
-    track_to_ui_id = {}  # Allocate a stable UI ID when any valid track is first sent.
+    ordinary_ui_id_allocator = CyclicUiIdAllocator(ORDINARY_VISION_UI_IDS)
+    ordinary_ui_sent_by_generation = {}
     latest_rid_bindings = {}
     last_applied_rid_measurement = {}
     last_selected_distance_source = {}
@@ -4147,19 +4312,18 @@ def main():
     fusion_window_start_t = 0.0
 
     def get_or_assign_ui_id(track):
-        nonlocal next_ui_id, track_to_ui_id
         internal_id = int(track.id)
         rid_binding = latest_rid_bindings.get(internal_id)
         if rid_binding is not None:
+            ordinary_ui_id_allocator.release(internal_id)
             return int(rid_binding["rid"]["ui_id"])
-        if internal_id not in track_to_ui_id:
-            assigned_ui_id = next_unreserved_ui_id(
-                next_ui_id,
-                reserved_special_ui_ids,
-            )
-            track_to_ui_id[internal_id] = assigned_ui_id
-            next_ui_id = assigned_ui_id + 1
-        return track_to_ui_id[internal_id]
+        special_ui_id = special_rid_ui_id_for_track(
+            track,
+            special_rid_registry,
+        )
+        if special_ui_id is not None:
+            return special_ui_id
+        return ordinary_ui_id_allocator.get_or_assign(internal_id)
 
     def maybe_print_live_status(now_t, meas_count=0, active_tracks=None, valid_tracks=None):
         nonlocal live_last_print, live_packet_count, live_obj_count
@@ -4219,35 +4383,6 @@ def main():
             key=lambda item: float(item.get("_recv_ts", 0.0) or 0.0),
         )
         return latest_pkgs, max(0, len(pkgs) - len(latest_pkgs))
-
-    if strike_sender is not None:
-        def log_strike_send(snapshot, packet, send_ts):
-            if FIELD_LOGGER is not None:
-                FIELD_LOGGER.write_strike_timing(snapshot, packet, send_ts)
-            row = dict(snapshot["log_row"])
-            row["timestamp"] = f"{send_ts:.6f}"
-            row["reason"] = (
-                f"settled_cmd_id={snapshot['settled_cmd_id']},"
-                f"packet={packet.hex(' ')}"
-            )
-            field_log_event(row)
-
-        def log_strike_send_error(snapshot, exc, send_ts):
-            if PRINT_EVENT_LOGS:
-                print(f"[Strike][Warn] send skipped: {exc}")
-            row = dict(snapshot["error_log_row"])
-            row["timestamp"] = f"{send_ts:.6f}"
-            row["reason"] = str(exc)
-            field_log_event(row)
-
-        strike_send_worker = PeriodicStrikeSender(
-            strike_sender,
-            send_hz=STRIKE_SEND_HZ,
-            hardware_state=shared_state,
-            on_send=log_strike_send,
-            on_error=log_strike_send_error,
-        )
-        strike_send_worker.start()
 
     while True:
         try:
@@ -4486,6 +4621,15 @@ def main():
                 now_t=curr_time,
                 debug_context=debug_context,
             )
+            ordinary_ui_id_allocator.release_inactive(
+                int(track.id) for track in active_tracks
+            )
+            active_sort_generations = {
+                sort_generation_from_track(track) for track in active_tracks
+            }
+            for generation in tuple(ordinary_ui_sent_by_generation):
+                if generation not in active_sort_generations:
+                    del ordinary_ui_sent_by_generation[generation]
 
             # Control/strike freshness and UI display freshness are independent:
             # the UI may bridge a detector dropout after control has released it.
@@ -4515,6 +4659,12 @@ def main():
                         sort_observation_from_track(
                             track,
                             map_azimuth=relative_to_map_azimuth,
+                            replaced_visual_ui_id=(
+                                ordinary_ui_sent_by_generation.get(
+                                    sort_generation_from_track(track),
+                                    0,
+                                )
+                            ),
                         )
                         for track in active_tracks
                         if getattr(track, "ui_confirmed", False)
@@ -4524,6 +4674,14 @@ def main():
                         station_snapshot,
                         now_ts=curr_time,
                     )
+                    release_completed_special_ui_assignments(
+                        ordinary_ui_id_allocator,
+                        active_tracks,
+                        special_rid_registry,
+                    )
+                    for generation in tuple(ordinary_ui_sent_by_generation):
+                        if special_rid_registry.owner_of(generation) is not None:
+                            del ordinary_ui_sent_by_generation[generation]
                 except Exception as e:
                     field_log_special_rid_identity({
                         "timestamp": f"{curr_time:.6f}",
@@ -4677,8 +4835,21 @@ def main():
                     f"lost_s={lost_seconds_values}"
                 )
 
+            ranging_owned_special_generations = (
+                special_rid_registry.owned_sort_generations()
+                if special_rid_registry is not None
+                else frozenset()
+            )
+            visual_ranging_tracks = select_ordinary_ui_tracks_for_output(
+                ui_tracks,
+                ranging_owned_special_generations,
+                special_rid_ui_exclusive=False,
+            )
             ranging_sort_tracks = []
-            for track in ui_tracks:
+            for track in visual_ranging_tracks:
+                ranging_ui_id = get_or_assign_ui_id(track)
+                if ranging_ui_id is None:
+                    continue
                 expected_delta_az = angular_diff(
                     track.state[0, 0], shared_gimbal_az
                 )
@@ -4689,7 +4860,7 @@ def main():
                 ranging_sort_tracks.append({
                     "track_id": int(track.id),
                     "track_created_ts": float(track.created_ts),
-                    "ui_id": get_or_assign_ui_id(track),
+                    "ui_id": ranging_ui_id,
                     "relative_az": float(track.state[0, 0]),
                     "map_az": relative_to_map_azimuth(track.state[0, 0]),
                     "elevation": float(track.state[1, 0]),
@@ -5325,6 +5496,8 @@ def main():
                         int(t.id), {}
                     )
                     ui_target_id = get_or_assign_ui_id(t)
+                    if ui_target_id is None:
+                        continue
                     ui_azimuth = relative_to_map_azimuth(t.state[0, 0])
                     ui_elevation = float(t.state[1, 0])
                     ui_distance = float(
@@ -5384,6 +5557,9 @@ def main():
                         )
                     if not ui_sent:
                         continue
+                    ordinary_ui_sent_by_generation[
+                        sort_generation_from_track(t)
+                    ] = int(ui_target_id)
                     ui_send_total += 1
                     ui_send_counter[int(ui_target_id)] += 1
                     field_log_event({
@@ -5435,6 +5611,8 @@ def main():
 
     if strike_send_worker is not None:
         strike_send_worker.stop()
+    if special_strike_send_worker is not None:
+        special_strike_send_worker.stop()
     if laser_stop_event is not None:
         laser_stop_event.set()
         time.sleep(0.05)

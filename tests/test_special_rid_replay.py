@@ -1,4 +1,5 @@
 import csv
+import hashlib
 import json
 import math
 import sys
@@ -11,9 +12,16 @@ sys.path.insert(0, str(ROOT_DIR))
 from tools_py.replay_special_rid_identity import replay_run  # noqa: E402
 
 
-XDB = "1581F6W8W255D0020XDB"
-ST22Q = "1581F986425C800ST22Q"
+RID_LASER_TEST_1 = "TEST-RID-LASER-1"
+RID_LASER_TEST_2 = "TEST-RID-LASER-2"
 EARTH_RADIUS_M = 6_371_008.8
+
+
+def _rid_laser_test_digests():
+    return frozenset(
+        hashlib.sha256(value.encode("utf-8")).digest()
+        for value in (RID_LASER_TEST_1, RID_LASER_TEST_2)
+    )
 
 
 def _rid_record(rid_id, timestamp, azimuth):
@@ -35,6 +43,7 @@ def _rid_record(rid_id, timestamp, azimuth):
                 "Lon": longitude,
                 "Lat": latitude,
                 "AltGeo": 460.0,
+                "Height": 10.0,
                 "H_Speed": 0.0,
                 "V_Speed": 0.0,
                 "Trk": 0.0,
@@ -105,28 +114,32 @@ def _write_compact_fixture(path):
         writer.writeheader()
         writer.writerows(measurements)
     rid_records = [
-        _rid_record(XDB, 9.9, 195.0),
-        _rid_record(ST22Q, 20.0, 182.0),
-        _rid_record(ST22Q, 29.9, 182.0),
-        _rid_record(ST22Q, 63.9, 185.49),
-        _rid_record(ST22Q, 69.9, 192.553),
-        _rid_record(ST22Q, 75.6, 194.2),
+        _rid_record(RID_LASER_TEST_1, 9.9, 195.0),
+        _rid_record(RID_LASER_TEST_2, 20.0, 182.0),
+        _rid_record(RID_LASER_TEST_2, 29.9, 182.0),
+        _rid_record(RID_LASER_TEST_2, 63.9, 185.49),
+        _rid_record(RID_LASER_TEST_2, 69.9, 192.553),
+        _rid_record(RID_LASER_TEST_2, 75.6, 194.2),
     ]
     with (path / "raw_rid_fixture.jsonl").open("w", encoding="utf-8") as stream:
         for record in rid_records:
             stream.write(json.dumps(record) + "\n")
 
 
-def test_replay_starts_at_xdb_checkpoint_and_preserves_st_family(tmp_path):
+def test_replay_starts_at_first_rid_laser_checkpoint_and_preserves_second_family(tmp_path):
     fixture_dir = tmp_path / "fixture"
     _write_compact_fixture(fixture_dir)
 
-    result = replay_run(fixture_dir, start_ts=10.0)
+    result = replay_run(
+        fixture_dir,
+        start_ts=10.0,
+        rid_laser_digests=_rid_laser_test_digests(),
+    )
 
-    assert result.registration_order == [XDB, ST22Q]
-    assert result.ui_ids == {XDB: 1, ST22Q: 2}
-    assert {189, 196, 202, 205, 238} <= result.sort_families[ST22Q]
-    assert result.owner_by_sort[238] == ST22Q
+    assert result.registration_order == [RID_LASER_TEST_1, RID_LASER_TEST_2]
+    assert result.ui_ids == {RID_LASER_TEST_1: 1, RID_LASER_TEST_2: 2}
+    assert {189, 196, 202, 205, 238} <= result.sort_families[RID_LASER_TEST_2]
+    assert result.owner_by_sort[238] == RID_LASER_TEST_2
     assert result.forbidden_steal_count >= 1
 
 
@@ -134,7 +147,11 @@ def test_replay_json_payload_is_serializable(tmp_path):
     fixture_dir = tmp_path / "fixture"
     _write_compact_fixture(fixture_dir)
 
-    result = replay_run(fixture_dir, start_ts=10.0)
+    result = replay_run(
+        fixture_dir,
+        start_ts=10.0,
+        rid_laser_digests=_rid_laser_test_digests(),
+    )
     encoded = json.dumps(result.json_ready(), ensure_ascii=False, sort_keys=True)
 
-    assert '"1581F6W8W255D0020XDB": [177]' in encoded
+    assert f'"{RID_LASER_TEST_1}": [177]' in encoded

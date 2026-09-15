@@ -20,12 +20,10 @@ if str(CORE_DIR) not in sys.path:
     sys.path.insert(0, str(CORE_DIR))
 
 from special_rid_identity import (  # noqa: E402
-    SPECIAL_RID_IDS,
-    ST22Q_RID,
-    XDB_RID,
     SortGeneration,
     SortObservation,
     SpecialRidRegistry,
+    is_rid_laser,
 )
 
 
@@ -97,15 +95,18 @@ def _station_from_events(rows):
 
 
 class _RidSnapshots:
-    def __init__(self):
+    def __init__(self, rid_laser_digests=None):
         self._states = {}
+        self.rid_laser_digests = rid_laser_digests
 
     def ingest(self, record):
         receive_ts = _float(record.get("receive_ts"))
         payload = record.get("payload") or {}
         uav = payload.get("UAVInfo") or {}
         rid_id = str(uav.get("ID", ""))
-        if receive_ts is None or rid_id not in SPECIAL_RID_IDS:
+        if receive_ts is None or not is_rid_laser(
+            rid_id, self.rid_laser_digests
+        ):
             return
         latitude = _float(uav.get("Lat"))
         longitude = _float(uav.get("Lon"))
@@ -121,6 +122,7 @@ class _RidSnapshots:
             latitude,
             longitude,
             _float(uav.get("AltGeo")),
+            _float(uav.get("Height")),
             _float(uav.get("H_Speed")),
             _float(uav.get("V_Speed")),
             _float(uav.get("Trk")),
@@ -134,6 +136,7 @@ class _RidSnapshots:
                 "latitude": latitude,
                 "longitude": longitude,
                 "alt_geo": _float(uav.get("AltGeo")),
+                "height": _float(uav.get("Height")),
                 "horizontal_speed": _float(uav.get("H_Speed")),
                 "vertical_speed": _float(uav.get("V_Speed")),
                 "track_heading": _float(uav.get("Trk")),
@@ -144,6 +147,7 @@ class _RidSnapshots:
             "latitude": latitude,
             "longitude": longitude,
             "alt_geo": _float(uav.get("AltGeo")),
+            "height": _float(uav.get("Height")),
             "horizontal_speed": _float(uav.get("H_Speed")),
             "vertical_speed": _float(uav.get("V_Speed")),
             "track_heading": _float(uav.get("Trk")),
@@ -165,6 +169,7 @@ class _RidSnapshots:
                 "latitude": state["latitude"],
                 "longitude": state["longitude"],
                 "alt_geo": state["alt_geo"],
+                "height": state["height"],
                 "horizontal_speed": state["horizontal_speed"],
                 "vertical_speed": state["vertical_speed"],
                 "track_heading": state["track_heading"],
@@ -211,7 +216,12 @@ def _load_rid_records(path):
     return records
 
 
-def replay_run(log_dir, start_ts=1789156230.355754, device_heading_deg=180.0):
+def replay_run(
+    log_dir,
+    start_ts=1789156230.355754,
+    device_heading_deg=180.0,
+    rid_laser_digests=None,
+):
     log_dir = Path(log_dir)
     event_rows = _load_csv(_first_path(log_dir, "events_*.csv"))
     measurement_rows = _load_csv(_first_path(log_dir, "measurements_*.csv"))
@@ -242,7 +252,8 @@ def replay_run(log_dir, start_ts=1789156230.355754, device_heading_deg=180.0):
     )
     if seed is None:
         raise ValueError("SORT177 checkpoint observation was not found")
-    # The requested replay begins with XDB already bound to the old UI28 / SORT177.
+    # The requested replay begins with the first RID_laser target already bound
+    # to the old UI28 / SORT177.
     # Rebase that existing generation onto the checkpoint so the new runtime can
     # seed UI1 without pretending the pre-checkpoint registration happened again.
     created_by_track[177] = float(start_ts)
@@ -258,8 +269,9 @@ def replay_run(log_dir, start_ts=1789156230.355754, device_heading_deg=180.0):
         sort_fresh_s=4.0,
         sort_internal_s=12.0,
         reacquire_delay_s=0.0,
+        rid_laser_digests=rid_laser_digests,
     )
-    rid_state = _RidSnapshots()
+    rid_state = _RidSnapshots(rid_laser_digests=rid_laser_digests)
     rid_position = 0
 
     def ingest_rids_through(timestamp):
@@ -307,11 +319,9 @@ def replay_run(log_dir, start_ts=1789156230.355754, device_heading_deg=180.0):
 
     seed_ts, seed_row = seed
     ingest_rids_through(seed_ts)
-    seed_snapshots = [
-        item for item in rid_state.snapshots() if item["rid_id"] == XDB_RID
-    ]
+    seed_snapshots = rid_state.snapshots()
     if not seed_snapshots:
-        raise ValueError("XDB RID data was not available at the replay checkpoint")
+        raise ValueError("RID_laser data was not available at the replay checkpoint")
     registry.observe_rids(seed_snapshots, now_ts=seed_ts)
     registry.observe_sorts(
         [observation_from_event(seed_ts, seed_row, force_confirmed=True)],

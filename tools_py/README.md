@@ -3,11 +3,11 @@
 Utility, calibration, RKNN conversion, display-test, and UDP receiver scripts.
 These are not required by the normal gimbal tracking runtime.
 
-## Special RID identity replay
+## RID_laser identity replay
 
-`replay_special_rid_identity.py` replays the two whitelisted RID aircraft and
+`replay_special_rid_identity.py` replays the two configured RID_laser aircraft and
 their SORT generations through the same production family-link logic. For the
-`20260912_032537` test, start at the XDB old-UI28/SORT177 checkpoint:
+`20260912_032537` test, start at the first RID_laser target's old-UI28/SORT177 checkpoint:
 
 ```bash
 python3 tools_py/replay_special_rid_identity.py \
@@ -15,8 +15,8 @@ python3 tools_py/replay_special_rid_identity.py \
   --start-ts 1789156230.355754
 ```
 
-The expected result is XDB/UI1 with family `{177}` and ST22Q/UI2 with family
-`{189,196,202,205,238}`; SORT238 remains owned by ST22Q. Add `--json` for a
+The expected result is RID_laser target 1/UI1 with family `{177}` and target 2/UI2
+with family `{189,196,202,205,238}`; SORT238 remains owned by target 2. Add `--json` for a
 machine-readable summary. The tool is read-only and never opens serial ports,
 sends UDP packets, or controls the gimbal.
 
